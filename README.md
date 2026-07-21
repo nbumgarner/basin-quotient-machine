@@ -122,11 +122,9 @@ foundation for asking it carefully.
 
 ## License
 
-BQSM Fair-Source License v1.0 — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).
 
-Source-available. Always free for research, development, personal use,
-and entities under $3M revenue. Commercial license required only for
-production use by entities above $3M.
+Open source. Use it, fork it, build on it.
 
 ---
 *emerging.systems — measured claims only.*
