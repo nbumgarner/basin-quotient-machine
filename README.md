@@ -116,8 +116,17 @@ foundation for asking it carefully.
 - `basin_machine.cpp` — the live demonstration (this repo's whole build).
 - The full instrument suite (locality sweeps, Markov/clock batteries,
   saddle-point energetics, and a batched C engine that reproduces the
-  Python instruments' published numbers exactly) is being prepared for
-  release alongside.
+  Python instruments' published numbers exactly) is shipped alongside.
+- `basin_visual.py` — ASCII video visualizer rendering all seven twisted
+  states with colored arrow glyphs (requires Pillow, NumPy, ffmpeg).
+
+## License
+
+BQSM Fair-Source License v1.0 — see [LICENSE](LICENSE).
+
+Source-available. Always free for research, development, personal use,
+and entities under $3M revenue. Commercial license required only for
+production use by entities above $3M.
 
 ---
 *emerging.systems — measured claims only.*

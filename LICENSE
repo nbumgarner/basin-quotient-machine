@@ -1,0 +1,115 @@
+BQSM Fair-Source License v1.0
+
+Copyright (c) 2026  BQSM Authors
+
+This license applies to:  basin-quotient-machine (all files in this repository)
+
+═══════════════════════════════════════════════════════════════
+1. SAFE-HARBOR — ALWAYS FREE, FOR EVERYONE, REGARDLESS OF SIZE
+═══════════════════════════════════════════════════════════════
+
+The following uses are granted free of charge to every user with no
+revenue or size restriction whatsoever:
+
+  (a) Evaluation and trials
+  (b) Development and prototyping
+  (c) Automated testing and continuous integration
+  (d) Benchmarking and performance measurement
+  (e) Academic and non-commercial research
+  (f) Personal, hobby, and homelab use
+  (g) Non-production staging environments
+
+If your use fits one of these categories, it is free — even for the
+largest company in the world.  No license key, no registration, no
+obligation.
+
+═══════════════════════════════════════════════════════════════
+2. PRODUCTION USE — TWO-GATE TRIGGER
+═══════════════════════════════════════════════════════════════
+
+A commercial license is required ONLY when BOTH of the following are
+true at the same time:
+
+  Gate A — PRODUCTION USE.
+    The use is production or mission-critical, meaning any use that
+    is NOT on the safe-harbor list in Section 1.  This includes:
+    • In-house operations the organization depends on
+    • Consumer-facing or customer-facing deployment
+
+  Gate B — ENTITY SIZE.
+    The entity's total annual gross revenue, aggregated across the
+    entity and all its affiliates (entities under common control by
+    ownership of more than 50% of voting equity), is USD $3,000,000
+    or more for the most recently completed fiscal year.
+
+If EITHER gate is not met, the use is free.  If BOTH gates are met,
+a commercial license must be obtained.
+
+OUTCOMES:
+
+| Entity Revenue | Use              | Result                        |
+|----------------|------------------|-------------------------------|
+| Under $3M      | Production       | FREE                          |
+| $3M or more    | Safe-harbor      | FREE                          |
+| Under $3M      | Safe-harbor      | FREE                          |
+| $3M or more    | Production       | COMMERCIAL LICENSE REQUIRED   |
+
+═══════════════════════════════════════════════════════════════
+3. COMMERCIAL LICENSE
+═══════════════════════════════════════════════════════════════
+
+A Standard Commercial License is available for entities meeting both
+gates.  Contact emerging.systems for terms, pricing, and volume
+options.
+
+═══════════════════════════════════════════════════════════════
+4. GRACE PERIOD
+═══════════════════════════════════════════════════════════════
+
+An entity that crosses the $3M revenue threshold while already
+running in production has a ninety (90) day grace period from the
+date it exceeds the threshold to obtain a commercial license.
+During the grace period, continued use is permitted without
+penalty.
+
+═══════════════════════════════════════════════════════════════
+5. WHAT THIS LICENSE IS NOT
+═══════════════════════════════════════════════════════════════
+
+This is a source-available ("fair-source") license.  It is NOT an
+OSI-approved open-source license.  It discriminates by user and
+field of use (the two gates), which the Open Source Definition does
+not permit.  Describe it as "source-available" or "fair-source" —
+never as "open source."
+
+═══════════════════════════════════════════════════════════════
+6. DISCLAIMER OF WARRANTY
+═══════════════════════════════════════════════════════════════
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+═══════════════════════════════════════════════════════════════
+7. CONTRIBUTIONS
+═══════════════════════════════════════════════════════════════
+
+By submitting a contribution, you grant the project maintainers a
+perpetual, worldwide, non-exclusive, royalty-free license to use,
+reproduce, modify, distribute, and sublicense your contribution as
+part of the Software.  You represent that you have the right to
+make this grant.
+
+═══════════════════════════════════════════════════════════════
+8. GOVERNING LAW
+═══════════════════════════════════════════════════════════════
+
+This License shall be governed by the laws of the State of
+Delaware, United States of America.  Any action arising under this
+License shall be brought exclusively in the federal or state courts
+located in Delaware.
