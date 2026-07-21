@@ -3,15 +3,15 @@
 basin_visual.py — ASCII video: the basin-quotient machine, alive.
 
   No physics simulation — smooth synthetic transitions between known
-  ring states. Fast render: ~2 minutes for 624 frames @ 1920×1080.
+  ring states. Renders via Pillow → ffmpeg pipe.
 
-  Output: basin_machine.mp4 (~26s @ 24fps)
+  Output: basin_machine.mp4 (~26s @ 1280x720 24fps)
 """
-import math, subprocess, sys, os, time
+import math, subprocess, sys, os, time, threading
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 1920, 1080
+W, H = 1280, 720
 FPS = 24
 N = 16; K = 1.0; NMASK = 15; Q_MAX = 3
 
@@ -55,35 +55,24 @@ def lerp(sa,sb,f):
     d=sb-sa; d=(d+np.pi)%(2*np.pi)-np.pi
     return (sa+d*f)%(2*np.pi)
 
-# ── synthetic transition: eased interpolation + noise ──────────────────────
 def synth_transition(th_from, th_kicked, th_to, n_frames):
-    """Smooth eased transition: pristine → kicked → settle (eased) → settled."""
-    traj = []
-    n_kick = max(4, n_frames//10)
-    n_ease = n_frames - n_kick
-
+    traj=[]
+    n_kick=max(4,n_frames//10); n_ease=n_frames-n_kick
     for fi in range(n_kick):
-        t = fi/max(n_kick-1,1)
-        # cubic ease to kick
-        e = t*t*(3-2*t)
+        t=fi/max(n_kick-1,1); e=t*t*(3-2*t)
         traj.append(lerp(th_from, th_kicked, e))
-
     for fi in range(n_ease):
-        t = fi/max(n_ease-1,1)
-        # ease-out cubic to settled
-        e = 1-(1-t)**3
-        th = lerp(th_kicked, th_to, e)
-        # add decaying ripple noise during settling
-        noise_amp = 0.15 * (1-t)**2 * np.sin(np.linspace(0, 8*np.pi*(1-t), N))
-        th = (th + noise_amp) % (2*np.pi)
+        t=fi/max(n_ease-1,1); e=1-(1-t)**3
+        th=lerp(th_kicked, th_to, e)
+        noise_amp=0.15*(1-t)**2*np.sin(np.linspace(0,8*np.pi*(1-t),N))
+        th=(th+noise_amp)%(2*np.pi)
         traj.append(th)
-
     return traj
 
 # ── drawing ────────────────────────────────────────────────────────────────
 def draw_ring(draw, cx, cy, r, th, size=20):
-    f = FONT if size>=20 else FONT12
-    q = winding(th); rc,gc,bc=pcolor(q)
+    f=FONT if size>=20 else FONT12
+    q=winding(th); rc,gc,bc=pcolor(q)
     for i in range(N):
         a=2*np.pi*i/N-np.pi/2; x=cx+r*np.cos(a); y=cy+r*np.sin(a)
         p=th[i]%(2*np.pi); g=int(round(p/(np.pi/4)))&7
@@ -109,11 +98,9 @@ def ripple(draw,cx,cy,r,strength,site):
         sz=int(4+8*alpha)
         draw.ellipse([rx-sz,ry-sz,rx+sz,ry+sz],fill=(255,220,80,int(255*alpha)))
 
-# Precomputed flat background — deep navy, no per-frame gradient allocation
 _BG = np.zeros((H,W,3), dtype=np.uint8)
-_BG[:,:,0] = 8; _BG[:,:,1] = 6; _BG[:,:,2] = 22  # deep navy
-def bg():
-    return _BG.copy()
+_BG[:,:,0]=8; _BG[:,:,1]=6; _BG[:,:,2]=22
+def bg(): return _BG.copy()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SCENES
@@ -160,12 +147,9 @@ def s_erase(draw,f,tot,traj):
     elif t<0.22: lb="KICKED  amp=2.2 at site 0"; ph="mid-transient"
     elif t<0.92: lb=f"settling... q→{q:+d}"; ph=""
     else: lb="q=+1  (after)"; ph="one quantum erased"
-
-    # ripple during kick
     if 0.12<t<0.40:
         rpl=1.0-abs(t-0.26)/0.14
         ripple(draw,cx,cy,r,max(0,rpl),0)
-
     draw_field(draw,cx,cy,r,th); draw_ring(draw,cx,cy,r,th,24)
     draw.text((W//2-150,H//2+r+50),lb,fill=pcolor(q),font=FONT36)
     if ph: draw.text((W//2-120,H//2+r+85),ph,fill=(160,160,200),font=FONT26)
@@ -183,11 +167,9 @@ def s_funnel(draw,f,tot,trajs):
     elif st<0.3: ph=f"bump {amp:.1f} applied"
     elif st<0.9: ph="relaxing..."
     else: ph="→ q=0  (always)"
-
     if 0.15<st<0.40:
         rpl=1.0-abs(st-0.275)/0.125
         ripple(draw,cx,cy,r,max(0,rpl)*amp/3.0,0)
-
     draw_field(draw,cx,cy,r,th); draw_ring(draw,cx,cy,r,th,24)
     draw.text((W//2-200,H//2+r+50),f"amp {amp:.1f}  →  q={q:+d}",fill=pcolor(q),font=FONT34)
     draw.text((W//2-100,H//2+r+85),ph,fill=(160,160,200),font=FONT26)
@@ -210,12 +192,12 @@ def s_write(draw,f,tot,tp,t2p,tc):
 
 def s_closing(draw,f,tot):
     t=f/max(tot-1,1); fade=min(1.0,t*2,(1-t)*3)
-    cx,cy,br=W//2,H//2,300
+    cx,cy,br=W//2,H//2,250
     for idx,q in enumerate([0,1,2,3,-1,-2,-3]):
-        if q==0: rx,ry,rr=cx,cy,80
+        if q==0: rx,ry,rr=cx,cy,60
         else:
             a=2*np.pi*(idx if q>0 else idx+0.5)/6-np.pi/2
-            rx=cx+br*np.cos(a); ry=cy+br*np.sin(a); rr=55
+            rx=cx+br*np.cos(a); ry=cy+br*np.sin(a); rr=45
         th=twisted(q)
         draw_field(draw,rx,ry,rr,th,0.15)
         draw_ring(draw,rx,ry,rr,th,12)
@@ -232,31 +214,24 @@ def s_closing(draw,f,tot):
               fill=tuple(int(c*fade*0.6) for c in (140,140,180)),font=FONT22)
 
 # ═══════════════════════════════════════════════════════════════════════════
-def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else "basin_machine.mp4"
+def render_all(output_path="basin_machine.mp4"):
     t0 = time.time()
 
-    # Build synthetic trajectories (instant)
-    print("Building trajectories...")
-    # Erase: q=+2 → kicked → q=+1
+    # Build synthetic trajectories
+    print("Building trajectories...", flush=True)
     traj_e = synth_transition(twisted(2), bump(twisted(2),0,2.2), twisted(1), 120)
-    # Funnel: q=0 → bumped (various amps) → q=0
     traj_f = {}
     for amp in [1.0,1.5,2.0,2.5,3.0]:
         k = bump(twisted(0),0,amp)
-        # stronger kick = more distorted intermediate
         noise = np.random.default_rng(42).normal(0, amp*0.3, N)
         k = (k + noise) % (2*np.pi)
         traj_f[amp] = synth_transition(twisted(0), k, twisted(0), 60)
-    # Write: π ramp (fails)
     traj_pi = synth_transition(twisted(0), ramp_v(twisted(0),0,np.pi,6), twisted(0), 60)
-    # Write: 2π ramp (success)
     traj_2pi = synth_transition(twisted(0), ramp_v(twisted(0),0,2*np.pi,6), twisted(1), 60)
-    # Write: chain
     traj_ch = synth_transition(twisted(1), ramp_v(twisted(1),0,2*np.pi,6), twisted(2), 60)
 
     print(f"  {len(traj_e)} erase, {sum(len(t) for t in traj_f.values())} funnel, "
-          f"{len(traj_pi)}+{len(traj_2pi)}+{len(traj_ch)} write frames")
+          f"{len(traj_pi)}+{len(traj_2pi)}+{len(traj_ch)} write frames", flush=True)
 
     scenes = [
         (0, 72,   lambda d,f,t: s_title(d,f,t),           "title"),
@@ -267,34 +242,43 @@ def main():
         (552, 624, lambda d,f,t: s_closing(d,f,t),         "closing"),
     ]
     total = scenes[-1][1]
-    print(f"Rendering {total} frames ({total/FPS:.1f}s) @ {W}x{H}...")
+    print(f"Rendering {total} frames ({total/FPS:.1f}s) @ {W}x{H}...", flush=True)
 
     cmd = ["ffmpeg","-y","-f","rawvideo","-vcodec","rawvideo",
            "-s",f"{W}x{H}","-pix_fmt","rgb24","-r",str(FPS),
-           "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-           "-pix_fmt","yuv420p","-movflags","+faststart",out]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+           "-i","-","-c:v","libx264","-preset","fast","-crf","22",
+           "-pix_fmt","yuv420p","-movflags","+faststart",output_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    try:
+    def feed_frames():
+        """Write frames to ffmpeg in a dedicated thread to avoid pipe deadlocks."""
         for fno in range(total):
             for start,end,func,name in scenes:
                 if start<=fno<end: fi=fno-start; ti=end-start; break
             cn=bg(); img=Image.fromarray(cn); draw=ImageDraw.Draw(img)
             func(draw,fi,ti)
-            proc.stdin.write(np.array(img).tobytes())
-
+            try:
+                proc.stdin.write(np.array(img).tobytes())
+            except BrokenPipeError:
+                return  # ffmpeg exited
             if fno%48==0:
                 el=time.time()-t0; fps_r=fno/max(el,0.01)
                 eta=(total-fno)/max(fps_r,0.01)
                 print(f"  [{fno*100//total:3d}%] {fno}/{total}  {name}  "
-                      f"({fps_r:.0f}fps, ETA {eta:.0f}s)")
+                      f"({fps_r:.0f}fps, ETA {eta:.0f}s)", flush=True)
+        proc.stdin.close()
 
-        proc.stdin.close(); proc.wait()
-        el=time.time()-t0
-        print(f"\nDone: {out}  ({el:.1f}s, {total/el:.0f} fps avg)")
-        print(f"Size: {os.path.getsize(out)/1024/1024:.1f} MB")
-    except BrokenPipeError:
-        proc.kill(); print("ERROR: ffmpeg pipe broke"); sys.exit(1)
+    # Run frame feeding in main thread (no threading needed for this simple case)
+    feed_frames()
+    proc.wait()
+    el=time.time()-t0
+    if os.path.exists(output_path):
+        sz = os.path.getsize(output_path)/1024/1024
+        print(f"\nDone: {output_path}  ({el:.1f}s, {total/el:.0f} fps avg, {sz:.1f} MB)", flush=True)
+    else:
+        print(f"\nERROR: {output_path} not created — ffmpeg may have failed", flush=True)
 
 if __name__ == "__main__":
-    main()
+    out = sys.argv[1] if len(sys.argv) > 1 else "basin_machine.mp4"
+    render_all(out)
