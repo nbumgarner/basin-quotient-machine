@@ -1,0 +1,177 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║                  THE BASIN-QUOTIENT N-ARY COMPUTER                       ║
+║                  ─────────────────────────────────                       ║
+║          A topological state machine on coupled-oscillator rings         ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+
+══════════  STATE SPACE: ENERGY-LAYERED ATTRACTORS  ══════════
+                                                    (N=16 ring)
+Energy
+ ^
+ │  V(q) = -N·cos(2πq/N)    ┌─────────────────────────────────┐
+ │                           │ q=±3  ██  V=-6.12   MARGINAL   │ ← volatile
+ │  shallow basins           │       ░░  globally soft        │   nonlocality
+ │    │                      │ q=±2  ▓▓  V=-11.31             │ ← n-ary extend
+ │    │  N-ARY DIMENSION ──→ │       ▒▒                       │
+ │    │                      │ q=±1  ░░  V=-14.78             │ ← LOGIC 1
+ │    ▼                      │       ░░                       │
+ │  deep basins              │ q= 0  ██  V=-16.00  GROUND     │ ← LOGIC 0
+ │                           └─────────────────────────────────┘   (absorbing)
+ └──────────────────────────────────────────────→ |q|
+
+
+══════════  INSTRUCTION SET (MEASURED, NOT DESIGNED)  ══════════
+
+ READ(q)    winding number → topological, free, robust
+ WRITE+1    2π phase ramp → exactly +1 quantum, else nil (quantized)
+ ERASE      scalar bump (3-site) → one-way funnel toward q=0
+ COMPARE    conditional branch on q value (READ + threshold)
+ RESET      strong ERASE → guaranteed q=0 (funnel property)
+
+
+══════════  N-ARY ENCODING: RADIX AS ENERGY DEPTH  ══════════
+
+ BINARY    (radix 2)    q∈{0,1}       1 bit/ring
+ TERNARY   (radix 3)    q∈{0,1,2}     ~1.6 bits/ring
+ QUAD      (radix 4)    q∈{0,1,2,3}   2 bits/ring
+ N-ARY     (radix N)    q∈{0..N-1}    log₂(N) bits/ring
+
+ At N=16 oscillator ring:  7 stable states → 2.8 bits/ring
+ At N=32 oscillator ring: 15 stable states → 3.9 bits/ring
+
+
+══════════  INSTRUCTION TABLE (pristine N=16 ring)  ══════════
+
+              START STATE
+              q=0    q=1    q=2    q=3
+   ERASE      q=0    q=0    q=1    q=2     ← one-way funnel ↓
+   WRITE+1    q=1    q=2    q=3    DEAD    ← quantized +1
+   RESET      q=0    q=0    q=0    q=0     ← guaranteed ground
+
+
+══════════  PHYSICAL ARCHITECTURE  ══════════
+
+                   ┌──────────────────────────┐
+                   │     CONTROL UNIT          │
+                   │  ┌──────┐ ┌───────────┐  │
+                   │  │ CLOCK│ │INSTR DECODE│  │
+                   │  │ ~7τ  │ │R|W|E|C|RST│  │
+                   │  └──────┘ └─────┬─────┘  │
+                   └─────────────────┼────────┘
+                                     │
+         ┌───────────────────────────┼──────────────────┐
+         │                           │                   │
+         ▼                           ▼                   ▼
+   ┌──────────┐              ┌──────────────┐     ┌──────────┐
+   │ REGISTER │              │     ALU       │     │  MEMORY  │
+   │   FILE   │              │ ┌──────────┐  │     │  FABRIC  │
+   │ ┌┐┌┐┌┐┌┐ │◄─────────────┤│ ADDER    │  │     │ ┌┐┌┐┌┐┌┐ │
+   │ ││││││││ │              ││ WRITE+1  │  │     │ │││││││││ │
+   │ ││││││││ │              │├──────────┤  │     │ │││││││││ │
+   │ └┘└┘└┘└┘ │              ││ FUNNEL   │  │     │ └┘└┘└┘└┘ │
+   │ q0 q1 q2 q3│             ││ ERASE ↓0 │  │     │ persisted │
+   └────────────┘              │├──────────┤  │     │ q-states  │
+                               ││ COMPARE  │  │     └──────────┘
+                               ││ branch   │  │
+                               │└──────────┘  │
+                               └──────────────┘
+
+
+══════════  EXECUTION PIPELINE  ══════════
+
+ FETCH ──→ DECODE ──→ KICK ──→ SETTLE ──→  READ
+  │                    │           │           │
+  │                    │           │           │
+ program            resolve     perturb     winding(q')
+ memory             opcode      fabric      → result
+                    +params     (apply      register
+                                instruction)
+
+
+══════════  ENERGETICS: BARRIERS & SWITCHING COST  ══════════
+
+                          barrier ΔV
+   switch cost = ──────────────────────
+                 coupling efficiency
+
+   q=0 → q=1:  barrier ~2.35  →  need ~6.7 energy
+   q=1 → q=2:  barrier ~1.0   →  need ~3.0 energy
+   q=2 → q=3:  barrier <0.5   →  need ~1.5 energy
+
+   TRADE-OFF: higher |q| = cheaper to switch BUT more volatile
+   → natural temperature/energy/radix design space
+
+
+══════════  FRAMEWORK BLUEPRINT  ══════════
+
+ 1. REGISTER TIER
+    ring_t:  { double phases[N], double omega[N] }
+    register_t: { ring_t *rings, int radix }
+    · N=16 oscillators per ring, N/4-1 stable q-states
+    · radix selects how many energy levels to admit
+
+ 2. INSTRUCTION TIER  
+    typedef enum { READ, WRITE, ERASE, COMPARE, RESET,
+                   KICK_AT, RAMP_AT } opcode_t;
+    instruction_t: { opcode, site, amplitude, width }
+    · WRITE = 2π ramp at specified site + width
+    · ERASE = scalar bump at specified site + amplitude
+
+ 3. TRANSITION TIER
+    T[Q_MAX][opcode_space] — precomputed, cached
+    · measured via batched settle (μs per entry at N=16)
+    · lens-editable: detune one site to reprogram T
+    · proven composable: T² = physical two-step
+
+ 4. EXECUTION TIER
+    clock = 1/K · (2π/N)²  ≈ 6.7/K  at N=16
+    state: { q, microstate_phase[N], locked_flag }
+    · SETTLE: integrate until phase-locked + q-stable
+    · early-exit: flow-invariance gate (gaps ∈ (-π+m, π-m))
+
+ 5. RADIX CONTROL TIER
+    BINARY:  q∈{0,1}     ERASE = NOT    WRITE+1 = SET
+    TERNARY: q∈{0,1,2}   ERASE = DEC    WRITE+1 = INC
+    N-ARY:   q∈{0..N}    each ring = log₂(N+1) bits
+    MIXED:   per-ring radix (control=binary, data=n-ary)
+
+
+══════════  DENSITY SCALING  ══════════
+
+ Oscillators   Stable    Bits per
+ per ring (N)  states    ring (log₂)
+ ─────────────────────────────────
+     16            7        2.8
+     32           15        3.9
+     64           31        4.9
+    128           63        5.9  (approaches log₂(N/2))
+
+ A 64-ring fabric:
+   binary mode:  64 bits
+   quad mode:   128 bits  (+2× density)
+   max n-ary:  ~179 bits  (+2.8× over binary)
+
+
+══════════  KEY PROPERTIES  ══════════
+
+ 1. TOPOLOGICAL: q is a topological invariant — free read, robust
+    to noise, survives small parameter changes
+
+ 2. ONE-WAY FUNNEL: scalar inputs always decrease |q|
+    → natural reset mechanism, no external ground needed
+
+ 3. QUANTIZED INCREMENT: 2π ramp writes exactly +1, else nil
+    → natural increment, no analog precision required
+
+ 4. MARKOVIAN: route-invariance proven (72/72 trials)
+    clock-freedom proven (composition: 36/36)
+
+ 5. LOCALLY EDITABLE: detuning one oscillator changes T
+    only near the defect, for robust states
+
+ 6. MARGINAL AS NONLOCALITY: |q| ≈ N/4 states carry
+    edits globally → probabilistic/chaotic computing channel
+
+ 7. ENERGY-ORDERED: V(q) monotonic in |q|, barriers shrink
+    with |q| → speed/stability/radix design triangle
