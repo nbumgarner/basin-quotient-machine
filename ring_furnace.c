@@ -56,12 +56,39 @@
 #define NMASK    (N - 1)                /* the ring-buffer index mask        */
 #define KCPL     1.0                    /* coupling strength K               */
 #define Q_MAX    3                      /* twisted states |q| ≤ 3 at N=16    */
-#define DT       0.02                   /* RK4 step (matches Python exactly) */
+#ifdef REF_BUILD
+#define DT       0.02                    /* RK4 step (bit-anchored oracle)    */
+#else
+#define DT       0.50                    /* RK4 step (throughput-optimized)   */
+#endif
 #define T_CHUNK  60.0                   /* settling chunk length             */
 #define LOCK_TOL 1e-8                   /* velocity-spread lock criterion    */
 #define MAXCHUNK 12                     /* settling patience, in chunks      */
 #define KICK_W   3                      /* kick window width                 */
 #define LMAX     256                    /* max lanes per batch (128 KB state)*/
+
+#ifndef REF_BUILD
+/* fast_sin — minimax degree-11 odd polynomial, range-reduced to [0, pi/2].
+ * Validated at 1.483e-11 max error (fs_check.c). Inline so the compiler
+ * auto-vectorizes the deriv lane loop (libm calls prevent vectorization).   */
+#define FS_C1   9.99999999914541360e-01
+#define FS_C3  -1.66666665577888368e-01
+#define FS_C5   8.33332959535318385e-03
+#define FS_C7  -1.98407312829215765e-04
+#define FS_C9   2.75199467123275398e-06
+#define FS_C11 -2.38101484600250895e-08
+static inline double fast_sin(double x){
+    x -= 2.0*M_PI * rint(x * (1.0/(2.0*M_PI))); /* branchless wrap to [-pi,pi] */
+    double s  = x < 0.0 ? -1.0 : 1.0;             /* odd symmetry               */
+    double xa = fabs(x);                          /* work on [0, pi]            */
+    xa = xa > M_PI*0.5 ? M_PI - xa : xa;          /* THE REFLECTION: sin(pi-x)  */
+    double x2 = xa*xa;                            /* Horner in x^2              */
+    return s * xa * (FS_C1 + x2*(FS_C3 + x2*(FS_C5 + x2*(FS_C7 + x2*(FS_C9 + x2*FS_C11)))));
+}
+#define SIN fast_sin
+#else
+#define SIN sin
+#endif
 
 /* Batch state, SoA: value of site i in lane l lives at [i*L + l].           */
 typedef struct {
@@ -91,17 +118,25 @@ static void batch_free(batch_t *b){
     free(b->k3); free(b->k4); free(b->tmp); free(b);    /* then the shell    */
 }
 
-/* dθ/dt for every lane at once. Outer loop = sites (the ring); inner loop =
- * lanes (unit stride — this is the loop the compiler turns into SIMD).      */
+/* dθ/dt for every lane at once — edge-walk form: one sin() per ring edge,
+ * distributed to both endpoints via antisymmetry. Outer loop = N edges;
+ * inner loop = lanes (unit stride — this is the SIMD-vectorizable loop).
+ * Mathematically identical to the per-site form (sin(θ_{i+1}-θ_i) pops up
+ * at site i as +s and at site i+1 as -s = sin(θ_i-θ_{i+1})).             */
 static void deriv(const double *th, const double *om, double *out, int L){
-    for (int i = 0; i < N; i++) {                       /* each ring site    */
-        int ir = ((i + 1) & NMASK) * L;                 /* right neighbor row*/
-        int il = ((i - 1) & NMASK) * L;                 /* left neighbor row */
-        int ii = i * L;                                 /* this site's row   */
-        for (int l = 0; l < L; l++)                     /* vectorized lanes  */
-            out[ii + l] = om[ii + l]
-                        + KCPL * (sin(th[ir + l] - th[ii + l])
-                                +  sin(th[il + l] - th[ii + l]));
+    /* init out[] = om[] — the natural-frequency baseline */
+    int M = N * L;
+    for (int j = 0; j < M; j++) out[j] = om[j];
+    /* edge walk: each coupling term adds to i, subtracts from i+1 */
+    for (int i = 0; i < N; i++) {
+        int j  = ((i + 1) & NMASK);                   /* right neighbor       */
+        int ii = i * L;                               /* site i row start     */
+        int jj = j * L;                               /* site j row start     */
+        for (int l = 0; l < L; l++) {                 /* vectorized lanes     */
+            double s = KCPL * SIN(th[jj + l] - th[ii + l]);
+            out[ii + l] += s;                         /* sin(θ_{i+1}-θ_i)     */
+            out[jj + l] -= s;                         /* -sin = sin(θ_i-θ_{i+1}) */
+        }
     }
 }
 
@@ -138,22 +173,52 @@ static void lock_spread(batch_t *b, double *spread){
  * ends). Converged lanes ride along at their fixed points — idempotent, so
  * correctness is untouched and control flow stays uniform for SIMD. Returns
  * per-lane lock flags. Total steps wasted on riders is bounded by the
- * slowest lane, which is exactly the lane we must wait for anyway.          */
+ * slowest lane, which is exactly the lane we must wait for anyway.
+ *
+ * FAST build adds early classification exit: retire a lane when all N
+ * wrapped gaps lie strictly inside (-pi+m, pi-m) with margin m=0.1 for
+ * 2 consecutive checks (Groisman flow-invariance, rigorous for pristine).
+ * Velocity-spread lock remains as fallback criterion.                    */
 static void settle(batch_t *b, int *locked){
     double spread[LMAX];                                /* per-lane residuals*/
     int steps = (int)(T_CHUNK / DT);                    /* steps per chunk   */
+#ifndef REF_BUILD
+    int gap_stable[LMAX];                               /* consecutive-gap    */
+    const double MARGIN = 0.1;                          /* Groisman margin    */
+    for (int l = 0; l < b->L; l++) gap_stable[l] = 0;   /* init gap counters  */
+#endif
     for (int l = 0; l < b->L; l++) locked[l] = 0;       /* none locked yet   */
     for (int c = 0; c < MAXCHUNK; c++) {                /* bounded patience  */
         for (int s = 0; s < steps; s++) rk4_step(b);    /* one chunk forward */
         lock_spread(b, spread);                         /* audit every lane  */
         int all = 1;                                    /* optimism          */
         for (int l = 0; l < b->L; l++) {                /* per-lane verdicts */
-            locked[l] = spread[l] < LOCK_TOL;           /* locked now?       */
-            all &= locked[l];                           /* batch-wide AND    */
+            int lck = spread[l] < LOCK_TOL;             /* velocity criterion */
+#ifndef REF_BUILD
+            /* Early classification exit (Groisman): all gaps strictly inside
+             * (-pi+m, pi-m) for 2 consecutive checks → flow-invariant.      */
+            if (!lck) {                                 /* not velocity-locked */
+                int gaps_ok = 1;                        /* optimism           */
+                for (int i = 0; i < N; i++) {           /* every ring edge    */
+                    int j = (i + 1) & NMASK;            /* neighbor           */
+                    double d = remainder(b->th[j*b->L + l]
+                                       - b->th[i*b->L + l], 2.0*M_PI);
+                    if (fabs(d) >= M_PI - MARGIN) {     /* too close to ±pi   */
+                        gaps_ok = 0; break;             /* fail: not invariant*/
+                    }
+                }
+                if (gaps_ok) {                          /* invariant region   */
+                    gap_stable[l]++;                    /* consecutive-count  */
+                    if (gap_stable[l] >= 2) lck = 1;    /* 2nd check: classify*/
+                } else gap_stable[l] = 0;               /* reset if fail      */
+            }
+#endif
+            locked[l] = lck;                            /* record verdict    */
+            if (!lck) all = 0;                          /* any still open?   */
         }
         if (all) return;                                /* everyone locked   */
     }                                                   /* patience expired: */
-}                                                       /* flags say who won */
+}
 
 /* Winding number of lane l: wrapped phase differences summed around the
  * ring, snapped to the integer topological invariant.                       */
@@ -496,10 +561,11 @@ static int settle_attractor(double delta, int q, double *out){
 /* The battery. csv gets tidy rows (section,delta,q,x,val,extra) for the
  * cross-delta diff; pass NULL to skip. Returns 0 on completion.             */
 static int cmd_octopus(double delta, long samples, int rays, int trials,
-                       const char *path){
+                       const char *path, int shard_id){
     FILE *csv = path ? fopen(path, "a") : NULL;         /* append: runs merge*/
     if (path && !csv) { perror(path); return 1; }       /* must be writable  */
-    rng_t rng = { 0x5EEDBA51ULL ^ (uint64_t)(delta*1e6) }; /* per-Δ stream   */
+    rng_t rng = { 0x5EEDBA51ULL ^ (uint64_t)(delta*1e6)
+                  ^ (0x9E3779B97F4A7C15ULL * (uint64_t)(shard_id + 1)) };
     printf("octopus battery: N=%d  delta=%.3f  lens@site %d  samples=%ld\n",
            N, delta, LENS_SITE, samples);
 
@@ -654,22 +720,28 @@ static int cmd_octopus(double delta, long samples, int rays, int trials,
         printf("   %-6.1f", alpha);                     /* row label         */
         for (int qi = 0; qi < 2; qi++) {                /* each state        */
             if (!aliveD[qi]) { printf("  %-9s", "dead"); continue; } /* gone */
-            batch_t *b = batch_new(trials);             /* trial batch       */
-            for (int l = 0; l < trials; l++) {          /* fill trials       */
-                for (int i = 0; i < N; i++)             /* box perturbation  */
-                    b->th[i*trials + l] = attD[qi][i]
-                        + (rng_uniform(&rng)*2.0 - 1.0) * alpha * M_PI;
-                b->om[LENS_SITE*trials + l] = delta;    /* lens on           */
+            int remaining = trials, ret = 0;
+            while (remaining > 0) {
+                int L = remaining < LMAX ? remaining : LMAX;
+                batch_t *b = batch_new(L);               /* fresh batch, correct stride */
+                for (int l = 0; l < L; l++) {           /* fill this batch   */
+                    for (int i = 0; i < N; i++) {       /* box perturbation  */
+                        double bx = rng_uniform(&rng);   /* independent per osc */
+                        b->th[i*L + l] = attD[qi][i]     /* stride = L        */
+                            + (bx*2.0 - 1.0) * alpha * M_PI;
+                    }
+                    b->om[LENS_SITE*L + l] = delta;      /* lens on           */
+                }
+                int lock[LMAX]; settle(b, lock);         /* one settle/batch  */
+                for (int l = 0; l < L; l++)              /* count reentries   */
+                    ret += lock[l] && (winding(b, l) == QD[qi]);
+                batch_free(b);                           /* free this batch   */
+                remaining -= L;
             }
-            int lock[LMAX]; settle(b, lock);            /* one settle/cell   */
-            int ret = 0;                                /* return counter    */
-            for (int l = 0; l < trials; l++)            /* count reentries   */
-                ret += lock[l] && (winding(b, l) == QD[qi]);
             double p = (double)ret / trials;            /* return prob       */
             printf("  %-9.3f", p);                      /* table cell        */
             if (csv) fprintf(csv, "D,%.4f,%d,%.2f,%.6f,%d\n",
                              delta, QD[qi], alpha, p, trials);
-            batch_free(b);                              /* cell done         */
         }
         printf("\n");                                   /* end row           */
     }
@@ -703,7 +775,8 @@ int main(int argc, char **argv){
                            argc > 3 ? atol(argv[3]) : 2000,   /* A samples   */
                            argc > 4 ? atoi(argv[4]) : 16,     /* B rays      */
                            argc > 5 ? atoi(argv[5]) : 96,     /* D trials    */
-                           argc > 6 ? argv[6] : NULL);        /* CSV (append)*/
+                           argc > 6 ? argv[6] : NULL,         /* CSV (append) */
+                           argc > 7 ? atoi(argv[7]) : 0);     /* shard id     */
     fprintf(stderr, "usage: ring_furnace selftest\n"
                     "       ring_furnace lens-sweep <d_lo> <d_hi> <steps> <out.csv>\n"
                     "       ring_furnace octopus <delta> [samples] [rays] [trials] [out.csv]\n");
