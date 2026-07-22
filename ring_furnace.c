@@ -379,6 +379,317 @@ static int cmd_lens_sweep(double lo, double hi, int steps, const char *path){
     return 0;
 }
 
+/* ===========================================================================
+ * OCTOPUS BATTERY (v2 addition) — basin-geometry experiments on this fabric
+ * ===========================================================================
+ * Ports the four measurements of Zhang & Strogatz, "Basins with Tentacles",
+ * PRL 127, 194101 (2021) [arXiv:2106.05709], onto the furnace's batch core,
+ * with the lens as the independent variable. The paper charts the static
+ * geometry of the pristine sine ring; the machine question this answers is
+ * how a lens DEFORMS that geometry:
+ *   A  basin sizes per winding number q from uniform global sampling, with
+ *      a weighted-fit race of ln p ~ -k q^2 (Gaussian) vs ln p ~ -k|q|.
+ *   C  distance from each sampled basin point to its attractor snapshot;
+ *      the paper's analytic target is d_inf = sqrt(pi^2/3) ~= 1.8138
+ *      ("mass lives at generic-random distance": the tentacles).
+ *   B  first-escape distance along random rays from each twisted state
+ *      (the "head" radius local probing sees).
+ *   D  reentry probability under box perturbations of half-width alpha*pi;
+ *      the nonzero plateau at alpha > 0.8 is the octopus signature, and at
+ *      alpha = 1.0 the box IS uniform sampling, so p(alpha=1) must agree
+ *      with Experiment A's basin size — a built-in cross-check.
+ * Run twice (delta = 0, then delta = 0.35 or wherever the sweep points) and
+ * diff: the working hypothesis from the lens-sweep finding is that k and
+ * the escape radii barely move while the plateau (tentacle census) shifts.
+ * ------------------------------------------------------------------------- */
+#define LENS_SITE   0                   /* lens position: matches published
+                                           sweep runs (site 0)               */
+#define RAMP_STEP   0.10                /* Exp B ramp step, normalized units;
+                                           halve for publication curves      */
+#define OOB         (-97)               /* sampled |q| beyond Q_MAX bin      */
+
+/* --- RNG: splitmix64 (Steele/Lea/Vigna constants). The furnace had no
+ * randomness before this battery; libc rand() is rejected for quality.      */
+typedef struct { uint64_t s; } rng_t;   /* one word of generator state       */
+static inline uint64_t rng_u64(rng_t *r){
+    uint64_t z = (r->s += 0x9e3779b97f4a7c15ULL);       /* golden increment  */
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;        /* avalanche mix 1   */
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;        /* avalanche mix 2   */
+    return z ^ (z >> 31);                               /* final xorshift    */
+}
+static inline double rng_uniform(rng_t *r){             /* double in [0,1)   */
+    return (double)(rng_u64(r) >> 11) * (1.0/9007199254740992.0); /* 53 bits */
+}
+static inline double rng_gauss(rng_t *r){               /* standard normal   */
+    double u1 = rng_uniform(r), u2 = rng_uniform(r);    /* two uniforms      */
+    if (u1 < 1e-300) u1 = 1e-300;                       /* guard log(0)      */
+    return sqrt(-2.0*log(u1)) * cos(2.0*M_PI*u2);       /* Box–Muller        */
+}
+
+/* Dimension-normalized torus distance d = sqrt(mean_i wrap|a_i-b_i|^2),
+ * the paper's metric; per-component distances live in [0, pi].              */
+static double dist_norm(const double *a, const double *b){
+    double acc = 0.0;                                   /* squared-gap sum   */
+    for (int i = 0; i < N; i++) {                       /* every site        */
+        double d = fabs(remainder(a[i] - b[i], 2.0*M_PI)); /* wrapped |gap|  */
+        acc += d * d;                                   /* accumulate        */
+    }
+    return sqrt(acc / N);                               /* RMS over sites    */
+}
+
+/* Rotation-gauge-invariant distance: minimum of dist_norm over a global
+ * phase shift applied to b. Needed because a lens makes Σdθ/dt = Δ ≠ 0 —
+ * locked states co-rotate, so the converged snapshot carries a common
+ * drift Δ·T/N relative to its start and the raw snapshot distance is
+ * contaminated. Scanning 128 shifts gives 0.05 rad resolution in the
+ * gauge; the distance is second-order flat at its minimum, so that is
+ * ample. Pristine fabric: mean phase is conserved, so this reduces to
+ * (at most marginally below) the snapshot metric — one metric, both cases. */
+static double dist_orbit(const double *a, const double *b){
+    double best = 1e30;                                 /* running minimum   */
+    for (int k = 0; k < 128; k++) {                     /* gauge scan        */
+        double c = 2.0*M_PI*k/128.0;                    /* candidate shift   */
+        double acc = 0.0;                               /* squared-gap sum   */
+        for (int i = 0; i < N; i++) {                   /* every site        */
+            double d = fabs(remainder(a[i] - b[i] - c, 2.0*M_PI)); /* gap    */
+            acc += d * d;                               /* accumulate        */
+        }
+        if (acc < best) best = acc;                     /* keep the best     */
+    }
+    return sqrt(best / N);                              /* RMS of best gauge */
+}
+
+/* Weighted least squares y ~ icept + slope*x; weights ~ 1/Var[ln p] under
+ * Bernoulli counting (i.e., the raw counts), so converged bins dominate.    */
+static void fit_line(int m, const double *x, const double *y, const double *w,
+                     double *slope, double *icept, double *sse){
+    double W=0, Sx=0, Sy=0, Sxx=0, Sxy=0;               /* weighted sums     */
+    for (int i = 0; i < m; i++) {                       /* normal equations  */
+        W += w[i]; Sx += w[i]*x[i]; Sy += w[i]*y[i];    /* 0th/1st moments   */
+        Sxx += w[i]*x[i]*x[i]; Sxy += w[i]*x[i]*y[i];   /* 2nd + cross       */
+    }
+    double den = W*Sxx - Sx*Sx;                         /* system det        */
+    *slope = (W*Sxy - Sx*Sy) / den;                     /* closed form       */
+    *icept = (Sy - *slope*Sx) / W;                      /* closed form       */
+    *sse = 0;                                           /* residual accum    */
+    for (int i = 0; i < m; i++) {                       /* weighted SSE      */
+        double r = y[i] - (*icept + *slope*x[i]);       /* residual          */
+        *sse += w[i]*r*r;                               /* accumulate        */
+    }
+}
+
+/* Settle the ideal q-twist under the lens; returns 1 and fills out[N] if it
+ * survives as a locked state with the right label, else 0. Duplicates the
+ * Phase-A logic of build_table for one state — deliberate small duplication
+ * rather than refactoring the trust-anchored table builder.                 */
+static int settle_attractor(double delta, int q, double *out){
+    batch_t *b = batch_new(1);                          /* one-lane batch    */
+    set_twisted(b, 0, q);                               /* the ideal twist   */
+    b->om[LENS_SITE] = delta;                           /* apply the lens    */
+    int lock[LMAX]; settle(b, lock);                    /* relax it          */
+    int ok = lock[0] && (winding(b, 0) == q);           /* survived intact?  */
+    if (ok) for (int i = 0; i < N; i++) out[i] = b->th[i]; /* export snapshot*/
+    batch_free(b);                                      /* done              */
+    return ok;                                          /* verdict           */
+}
+
+/* The battery. csv gets tidy rows (section,delta,q,x,val,extra) for the
+ * cross-delta diff; pass NULL to skip. Returns 0 on completion.             */
+static int cmd_octopus(double delta, long samples, int rays, int trials,
+                       const char *path){
+    FILE *csv = path ? fopen(path, "a") : NULL;         /* append: runs merge*/
+    if (path && !csv) { perror(path); return 1; }       /* must be writable  */
+    rng_t rng = { 0x5EEDBA51ULL ^ (uint64_t)(delta*1e6) }; /* per-Δ stream   */
+    printf("octopus battery: N=%d  delta=%.3f  lens@site %d  samples=%ld\n",
+           N, delta, LENS_SITE, samples);
+
+    /* ---- Experiments A + C: uniform global sampling, batched ------------ */
+    long qcnt[2*Q_MAX + 1] = {0};                       /* per-q basin hits  */
+    long oob = 0, nolck = 0;                            /* overflow/unlocked */
+    double dsum = 0, dsq = 0; long dcnt = 0;            /* snapshot moments  */
+    double osum = 0, osq = 0;                           /* orbit moments     */
+    clock_t w0 = clock();                               /* section timer     */
+    long done = 0;                                      /* samples completed */
+    while (done < samples) {                            /* batch loop        */
+        int L = (samples - done) < LMAX ? (int)(samples - done) : LMAX;
+        batch_t *b = batch_new(L);                      /* one batch         */
+        double *start = malloc((size_t)N * L * sizeof(double)); /* IC copy   */
+        if (!start) { fprintf(stderr, "alloc failed\n"); exit(1); }
+        for (int l = 0; l < L; l++) {                   /* fill lanes        */
+            for (int i = 0; i < N; i++) {               /* uniform torus IC  */
+                double v = (rng_uniform(&rng) - 0.5) * 2.0 * M_PI; /* (-pi,pi)*/
+                b->th[i*L + l] = v;                     /* live state        */
+                start[i*L + l] = v;                     /* remembered start  */
+            }
+            b->om[LENS_SITE*L + l] = delta;             /* lens on each lane */
+        }
+        int lock[LMAX]; settle(b, lock);                /* THE batched settle*/
+        for (int l = 0; l < L; l++) {                   /* read every lane   */
+            if (!lock[l]) { nolck++; continue; }        /* drifters counted  */
+            int q = winding(b, l);                      /* basin label       */
+            if (q >= -Q_MAX && q <= Q_MAX) qcnt[q + Q_MAX]++; /* tally       */
+            else oob++;                                 /* beyond bins       */
+            double a[N], s[N];                          /* de-strided copies */
+            for (int i = 0; i < N; i++) { a[i] = b->th[i*L + l];  /* final   */
+                                          s[i] = start[i*L + l]; }/* start   */
+            double d = dist_norm(s, a);                 /* snapshot distance */
+            double o = dist_orbit(s, a);                /* gauge-fixed dist. */
+            dsum += d; dsq += d*d; dcnt++;              /* snapshot moments  */
+            osum += o; osq += o*o;                      /* orbit moments     */
+        }
+        free(start); batch_free(b);                     /* batch done        */
+        done += L;                                      /* progress          */
+    }
+    double secsA = (double)(clock() - w0) / CLOCKS_PER_SEC; /* section time  */
+    printf("== A: basin sizes  (%.1fs)   [nolock=%ld oob=%ld]\n",
+           secsA, nolck, oob);
+    printf("   %-4s %-8s %-11s %-8s\n", "q", "count", "p", "rel.err");
+    double fxg[Q_MAX+1], fxe[Q_MAX+1], fy[Q_MAX+1], fw[Q_MAX+1]; /* fit data */
+    int npts = 0;                                       /* fit point count   */
+    for (int q = -Q_MAX; q <= Q_MAX; q++) {             /* report all bins   */
+        long c = qcnt[q + Q_MAX];                       /* this bin's count  */
+        if (!c) continue;                               /* skip empty        */
+        double p = (double)c / samples;                 /* basin size        */
+        printf("   %-4d %-8ld %-11.3e %-8.3f\n", q, c, p, 1.0/sqrt(p*samples));
+        if (csv) fprintf(csv, "A,%.4f,%d,0,%.6e,%ld\n", delta, q, p, c);
+        if (q >= 0 && c >= 5) {                         /* pool ±q for fits  */
+            long cs = c + (q ? qcnt[-q + Q_MAX] : 0);   /* merged count      */
+            fxg[npts] = (double)q*q;                    /* Gaussian abscissa */
+            fxe[npts] = (double)q;                      /* exponential absc. */
+            fy[npts]  = log((double)cs / samples);      /* ln p              */
+            fw[npts]  = (double)cs;                     /* ~1/Var[ln p]      */
+            npts++;                                     /* one more point    */
+        }
+    }
+    if (npts >= 3) {                                    /* race the fits     */
+        double kg, bg, sg, ke, be, se;                  /* two fit outputs   */
+        fit_line(npts, fxg, fy, fw, &kg, &bg, &sg);     /* ln p ~ -k q^2     */
+        fit_line(npts, fxe, fy, fw, &ke, &be, &se);     /* ln p ~ -k |q|     */
+        printf("   k(gauss)=%.4f SSE=%.3g | k(exp)=%.4f SSE=%.3g -> %s\n",
+               -kg, sg, -ke, se, sg < se ? "GAUSSIAN" : "EXPONENTIAL");
+        if (csv) fprintf(csv, "K,%.4f,0,0,%.6f,%d\n", delta, -kg, sg < se);
+    } else printf("   (too few bins for a fit at this delta)\n");
+    double dm = dsum / dcnt, dv = dsq/dcnt - dm*dm;     /* snapshot stats    */
+    double om_ = osum / dcnt, ov = osq/dcnt - om_*om_;  /* orbit stats       */
+    printf("== C: mean d(start->attractor)  snapshot = %.4f sd=%.4f  |  "
+           "orbit = %.4f sd=%.4f   [d_inf = %.4f]\n",
+           dm, sqrt(dv > 0 ? dv : 0), om_, sqrt(ov > 0 ? ov : 0),
+           sqrt(M_PI*M_PI/3.0));
+    printf("   (orbit metric is the lens-valid one: co-rotation drift is\n"
+           "    gauged out; snapshot kept for continuity with pristine runs)\n");
+    if (csv) fprintf(csv, "C,%.4f,0,0,%.6f,%ld\n", delta, dm, dcnt);
+    if (csv) fprintf(csv, "C2,%.4f,0,0,%.6f,%ld\n", delta, om_, dcnt);
+
+    /* ---- Experiment B: escape distances, batched over (ray x ramp) ------ */
+    printf("== B: first-escape distances (ramp step %.2f)\n", RAMP_STEP);
+    int P = (int)(M_PI / RAMP_STEP);                    /* ramp points/ray   */
+    int group = LMAX / P;                               /* rays per batch    */
+    if (group < 1) group = 1;                           /* safety floor      */
+    static const int QB[3] = {0, 2, 3};                 /* probe states      */
+    for (int qi = 0; qi < 3; qi++) {                    /* each probed q     */
+        int q = QB[qi];                                 /* state under test  */
+        double att[N];                                  /* its snapshot      */
+        if (!settle_attractor(delta, q, att)) {         /* lens may kill it  */
+            printf("   q=%-2d  DEAD under this lens (matches alphabet loss)\n", q);
+            if (csv) fprintf(csv, "B,%.4f,%d,0,-1,0\n", delta, q);
+            continue;                                   /* nothing to probe  */
+        }
+        double esum=0, esq=0, emin=1e30, emax=0;        /* escape moments    */
+        int edone = 0;                                  /* rays finished     */
+        for (int r0 = 0; r0 < rays; r0 += group) {      /* ray groups        */
+            int G = (rays - r0) < group ? rays - r0 : group; /* group size   */
+            int L = G * P;                              /* lanes this batch  */
+            batch_t *b = batch_new(L);                  /* the probe batch   */
+            double u[N];                                /* one ray direction */
+            for (int g = 0; g < G; g++) {               /* each ray in group */
+                double nrm = 0;                         /* direction norm    */
+                for (int i = 0; i < N; i++) {           /* isotropic gauss   */
+                    u[i] = rng_gauss(&rng);             /* iid component     */
+                    nrm += u[i]*u[i];                   /* squared norm      */
+                }
+                nrm = sqrt(nrm);                        /* length            */
+                for (int i = 0; i < N; i++) u[i] /= nrm;/* unit ray          */
+                for (int pnt = 0; pnt < P; pnt++) {     /* every ramp point  */
+                    int l = g*P + pnt;                  /* its lane          */
+                    double s = (pnt+1)*RAMP_STEP*sqrt((double)N); /* raw len */
+                    for (int i = 0; i < N; i++)         /* attractor + s*u   */
+                        b->th[i*L + l] = att[i] + s*u[i];
+                    b->om[LENS_SITE*L + l] = delta;     /* lens on           */
+                }
+            }
+            int lock[LMAX]; settle(b, lock);            /* one settle/group  */
+            for (int g = 0; g < G; g++) {               /* first exit scan   */
+                double d_esc = M_PI;                    /* default: no exit  */
+                for (int pnt = 0; pnt < P; pnt++) {     /* ascending ramp    */
+                    int l = g*P + pnt;                  /* lane address      */
+                    if (!lock[l] || winding(b, l) != q) {  /* left basin?    */
+                        d_esc = (pnt+1)*RAMP_STEP;      /* first-exit dist   */
+                        break;                          /* ray resolved      */
+                    }
+                }
+                esum += d_esc; esq += d_esc*d_esc;      /* moments           */
+                if (d_esc < emin) emin = d_esc;         /* range low         */
+                if (d_esc > emax) emax = d_esc;         /* range high        */
+                edone++;                                /* ray complete      */
+            }
+            batch_free(b);                              /* group done        */
+        }
+        double em = esum/edone, ev = esq/edone - em*em; /* statistics        */
+        printf("   q=%-2d  rays=%-3d mean=%.3f sd=%.3f min=%.2f max=%.2f\n",
+               q, edone, em, sqrt(ev > 0 ? ev : 0), emin, emax);
+        if (csv) fprintf(csv, "B,%.4f,%d,0,%.6f,%d\n", delta, q, em, edone);
+    }
+
+    /* ---- Experiment D: reentry probability vs alpha ---------------------- */
+    printf("== D: return probability vs alpha   [plateau at alpha>0.8 = octopus]\n");
+    printf("   %-6s", "alpha");                         /* header row        */
+    static const int QD[2] = {0, 2};                    /* tested states     */
+    double attD[2][N]; int aliveD[2];                   /* their snapshots   */
+    for (int qi = 0; qi < 2; qi++) {                    /* settle both       */
+        aliveD[qi] = settle_attractor(delta, QD[qi], attD[qi]); /* lens-aware*/
+        printf("  p(q=%d)%s", QD[qi], aliveD[qi] ? "   " : " X ");  /* label */
+    }
+    printf("\n");                                       /* end header        */
+    for (double alpha = 0.4; alpha <= 1.001; alpha += 0.1) { /* paper's axis */
+        printf("   %-6.1f", alpha);                     /* row label         */
+        for (int qi = 0; qi < 2; qi++) {                /* each state        */
+            if (!aliveD[qi]) { printf("  %-9s", "dead"); continue; } /* gone */
+            batch_t *b = batch_new(trials);             /* trial batch       */
+            for (int l = 0; l < trials; l++) {          /* fill trials       */
+                for (int i = 0; i < N; i++)             /* box perturbation  */
+                    b->th[i*trials + l] = attD[qi][i]
+                        + (rng_uniform(&rng)*2.0 - 1.0) * alpha * M_PI;
+                b->om[LENS_SITE*trials + l] = delta;    /* lens on           */
+            }
+            int lock[LMAX]; settle(b, lock);            /* one settle/cell   */
+            int ret = 0;                                /* return counter    */
+            for (int l = 0; l < trials; l++)            /* count reentries   */
+                ret += lock[l] && (winding(b, l) == QD[qi]);
+            double p = (double)ret / trials;            /* return prob       */
+            printf("  %-9.3f", p);                      /* table cell        */
+            if (csv) fprintf(csv, "D,%.4f,%d,%.2f,%.6f,%d\n",
+                             delta, QD[qi], alpha, p, trials);
+            batch_free(b);                              /* cell done         */
+        }
+        printf("\n");                                   /* end row           */
+    }
+    if (csv) fclose(csv);                               /* results durable   */
+    printf("battery complete.\n");                      /* hand-off line     */
+    return 0;                                           /* clean exit        */
+}
+/* [Block rationale] Everything reuses the furnace's own dynamics — deriv,
+ * settle, winding — so the battery inherits the selftest's trust anchor
+ * verbatim; the only new physics-touching code is the distance metric and
+ * the RNG. Experiment B batches (ray x ramp-point) into one settle per
+ * group: tentacled basins make inside/outside non-monotone along a ray, so
+ * the FIRST exit must come from an ascending scan, but nothing says the
+ * probes must be integrated sequentially — settling them all at once keeps
+ * the SIMD lanes full, which is the furnace's entire design thesis.
+ * Alternatives considered: threading (rejected — fleet doctrine is one
+ * process per shard); reusing build_table's Phase A via refactor (rejected
+ * — build_table is selftest-anchored and stays untouched); bisection for
+ * escapes (rejected — finds AN exit, not the first).                        */
+
 int main(int argc, char **argv){
     if ((N & NMASK) != 0 || N < 8)                      /* mask trick guard  */
         { fprintf(stderr, "N must be a power of two ≥ 8\n"); return 2; }
@@ -387,8 +698,15 @@ int main(int argc, char **argv){
     if (argc == 6 && !strcmp(argv[1], "lens-sweep"))    /* the Δ furnace     */
         return cmd_lens_sweep(atof(argv[2]), atof(argv[3]),
                               atoi(argv[4]), argv[5]);
+    if (argc >= 3 && !strcmp(argv[1], "octopus"))       /* basin geometry    */
+        return cmd_octopus(atof(argv[2]),               /* lens delta        */
+                           argc > 3 ? atol(argv[3]) : 2000,   /* A samples   */
+                           argc > 4 ? atoi(argv[4]) : 16,     /* B rays      */
+                           argc > 5 ? atoi(argv[5]) : 96,     /* D trials    */
+                           argc > 6 ? argv[6] : NULL);        /* CSV (append)*/
     fprintf(stderr, "usage: ring_furnace selftest\n"
-                    "       ring_furnace lens-sweep <d_lo> <d_hi> <steps> <out.csv>\n");
+                    "       ring_furnace lens-sweep <d_lo> <d_hi> <steps> <out.csv>\n"
+                    "       ring_furnace octopus <delta> [samples] [rays] [trials] [out.csv]\n");
     return 2;                                           /* bad invocation    */
 }
 /* [Block rationale] Two subcommands only, on purpose: selftest is the
@@ -439,4 +757,65 @@ int main(int argc, char **argv){
  *   window's exact edges); whether the Δ=0.70 far-field is ±2-mediated
  *   (same debug method applies); N-scaling of all of the above. All are
  *   grid shards for the fleet: one process per core, CSVs merge.
+ * ======================================================================= */
+
+/* ===========================================================================
+ * RESULTS LOG — v2 (octopus battery), 2026-07-21 (chat container, gcc -O3)
+ * ===========================================================================
+ * CONTEXT: Zhang & Strogatz, "Basins with Tentacles", PRL 127, 194101
+ *   (2021) charts the basin geometry of exactly this substrate (sine-
+ *   coupled ring, twisted states, winding number q). Their findings:
+ *   basin volume ~ e^{-k q^2} (Gaussian in q, not exponential); basin
+ *   mass concentrated at generic-random distance d_inf = sqrt(pi^2/3)
+ *   ~ 1.8138 from the attractor (tentacles), far beyond the escape radii
+ *   local probing sees (heads); return probability under box kicks
+ *   plateaus for alpha > 0.8 (rays exit and reenter: the octopus
+ *   signature). A standalone baseline (octopus.c, n=83) reproduced all
+ *   four on this stack: Gaussian SSE 602 vs exponential 1710, k~0.151;
+ *   mean d 1.8026 vs 1.8138; escape/mass distributions disjoint; plateau
+ *   with the alpha=1 value matching the global basin size (0.23 vs 0.24).
+ * NEW SUBCOMMAND: `octopus <delta> [samples] [rays] [trials] [csv]` runs
+ *   the four experiments ON THIS FABRIC with the lens as the independent
+ *   variable, batched on the SoA core (Exp B batches ray x ramp-point
+ *   into one settle per group). Original selftest untouched: ALL PASS.
+ * INSTRUMENT BUG CAUGHT (the cautionary record, v2 edition): first run
+ *   showed Exp C jumping 1.53 -> 1.97 under Delta=0.35 — would have read
+ *   as "lens restructures the tentacles." FALSE. Under a lens the fabric
+ *   is not a gradient flow (sum dtheta/dt = Delta), locked states
+ *   co-rotate at Delta/N, and every lane in a batch integrates the same
+ *   wall time, so converged snapshots carry a common drift Delta*T/N
+ *   that mechanically inflates start->snapshot distance. Fix: dist_orbit
+ *   minimizes over the global rotation gauge (128-point scan). Verdict
+ *   after fix: orbit distance 1.4680 (pristine) vs 1.4684 (Delta=0.35),
+ *   sd 0.159 both — IDENTICAL. The apparent shift was pure gauge.
+ * DIFF AT Delta=0.35 vs 0.00 (N=16, 2000 samples, 16 rays, 96 trials):
+ *   INVARIANT under the lens (at this resolution):
+ *     - Gaussian basin law and its coefficient: k 0.566 -> 0.571, both
+ *       decisively Gaussian over exponential (SSE 109/272 vs 113/257).
+ *     - Gauge-fixed tentacle census: orbit-d 1.4680 -> 1.4684.
+ *     - q=2 escape head: 0.975 -> 0.956 (unchanged within sd).
+ *   CHANGED under the lens:
+ *     - Alphabet: q=+/-3 DEAD — independently reproduced here by the
+ *       escape probe, converging with the v1 transition-table finding.
+ *   SUGGESTIVE, 1-2 sigma ONLY (fleet statistics required):
+ *     - q=0 escape head 1.64 -> 1.86 (16 rays, ~1.8 sigma).
+ *     - q=0 plateau depression at alpha >= 0.8: (0.698, 0.615, 0.531)
+ *       -> (0.677, 0.500, 0.458); alpha=1 cross-check anchors pristine
+ *       (0.531 vs basin 0.542) but sits 1.8 sigma low lensed (0.458 vs
+ *       0.5505) — either noise or the tentacle-reroute signal.
+ * READING: at the clean-regime operating point the lens acts on the
+ *   MARGINAL family (deletion) and the TRANSITION TABLE (rewiring) while
+ *   leaving the surviving basins' measure and gauge-invariant geometry
+ *   untouched — instructions deform the machine without deforming the
+ *   landscape's bulk statistics. Sharpens the v1 design rule: the basin
+ *   measure is not the lever; the boundaries are.
+ * ALSO NOTED (pristine, below-Gaussian marginals): +/-3 caught ZERO of
+ *   2000 samples where the Gaussian fit predicts ~6 — marginal-family
+ *   basins are suppressed below the bulk law. The v1 nonlocality story
+ *   is visible in the MEASURE, not just the table.
+ * FLEET SHARDS: samples=20000 rays=200 trials=2000 per Delta resolves
+ *   the two 1-2 sigma trends; per-Delta grid over the 0.10-0.20 window
+ *   ties plateau depression to the far-field violation window. One
+ *   process per core, CSVs append and merge (schema:
+ *   section,delta,q,x,val,extra).
  * ======================================================================= */
