@@ -1,0 +1,45 @@
+══════════════════════════════════════════════════════════════════════════
+                    BQSM INFERENCE SERVER — BUILD JOURNAL
+══════════════════════════════════════════════════════════════════════════
+
+Project: BQSM-Driven AI Inference Server
+Goal: Production-quality, portable, OpenAI-compatible inference server
+       optimized for edge devices and older hardware (SSE4.1 / NEON).
+Target: User-ready finished product.
+Start:  2026-07-23
+Repo:   github.com/nbumgarner/basin-quotient-machine
+
+──────────────────────────────────────────────────────────────────────────
+ENTRY 001 — 2026-07-23 — PROJECT INITIALIZATION
+──────────────────────────────────────────────────────────────────────────
+
+Created summary.txt documenting the full research trajectory from the
+basin-quotient machine discovery through the n-ary architecture to the
+SIMD inference engine breakthrough.
+
+Established the product vision: a single-binary OpenAI-compatible
+inference server using BQSM pshufb/NEON matmul kernels. The server will
+serve chat, image, and video generation endpoints backed by quantized
+models running on the BQSM inference engine.
+
+Architecture decided:
+  - HTTP: libmicrohttpd (lightweight, no dependencies, embedded)
+  - API: OpenAI-compatible (/v1/chat/completions, etc.)
+  - Backend: bqsm_simd.c pshufb kernel (already at 2.8 GMACs/s)
+  - Model format: .bqsm (7-state quantized) with .gguf fallback
+  - Targets: x86_64 SSE4.1+, aarch64 NEON
+
+Phase III artifacts available:
+  - bqsm_simd.c:     pshufb kernel, 2.8 GMACs/s, 5.1× over scalar
+  - bqsm_convert.py: GGUF → BQSM converter
+  - bqsm_load.c:     .bqsm file loader
+  - bqsm_matmul.c:   ternary matmul kernel
+  - bqsm_batch.c:    SoA batched matmul, 8.2 ternary-eq GMACs/s
+  - bqsm_inference.c: pure int8 forward pass, 11.9M inf/s
+
+Model available: gemma-2-2b-it-abliterated-Q4_K_M.gguf (1.6GB)
+BQSM weights: gemma-2b.bqsm (61MB, 3 tensors, layer 0 only)
+
+Next: build bqsm_server.c skeleton with libmicrohttpd integration.
+
+──────────────────────────────────────────────────────────────────────────
