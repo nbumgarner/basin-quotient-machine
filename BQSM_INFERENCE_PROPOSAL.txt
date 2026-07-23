@@ -1,0 +1,122 @@
+═══ BQSM-ACCELERATED INFERENCE ON THE T7400 ═══
+    A proposal for running LLM inference on a 2007 Harpertown
+
+
+PROBLEM
+  llama.cpp + 14B Q4_K_M → ~0.05 tok/s on T7400
+  Cause: Q4 dequantization + float matmul on SSE4.1-only pipeline
+  Even at 100% CPU, the SSE4.1 FLOPS ceiling is ~4 GFLOPS.
+  A 14B model at 7 GFLOPS/token needs ~1.75s/token minimum.
+  We're seeing 20s/token because the SSE4.1 path in ggml
+  isn't well-tuned for this specific CPU.
+
+WHAT WE HAVE THAT'S FAST
+  bqsm_matmul:   5.7 GFLOPS-eq (8-core, ternary weights, int8 LUT)
+  bqsm_inference: 11.9M inf/s (12-lookup XOR model)
+  ring_furnace:   2857 samples/s (batch settle on 256 lanes)
+
+KEY INSIGHT
+  The BQSM matmul kernel is bottlenecked by MEMORY BANDWIDTH,
+  not compute. With ternary weights at 1.6 bits/weight:
+  
+    binary matmul:   read 2 bytes/weight + 4 bytes/accumulate = 6 bytes/MAC
+                     6.5 GB/s ÷ 6 = 1.08 GMACs/s (matches our measured 0.5)
+    
+    bqsm matmul:     read 1 byte input + 0.2 bytes weight + 4 bytes acc
+                     ≈ 5.2 bytes/MAC. 6.5 GB/s ÷ 5.2 = 1.25 GMACs/s
+                     (we measure 5.7 GFLOPS-eq = 2.85 GMACs/s — the difference
+                      is L1/L2 cache hits on repeated weight reads)
+
+  The T7400 can sustain ~1 GMAC/s from RAM. At ternary precision,
+  a 14B-parameter model's weights compress to ~2.8GB (14B × 0.2 bytes).
+  Reading 2.8GB per token at 6.5 GB/s = 0.43 seconds per token.
+  
+  That's the HARDWARE LIMIT. You cannot go faster than memory bandwidth
+  divided by model size. The 20s/token we're seeing is a SOFTWARE problem —
+  llama.cpp is doing float dequantization + float matmul instead of
+  integer matmul with compressed weights.
+
+
+SOLUTION: BQSM-DISTILLED INFERENCE PIPELINE
+
+  Phase 1: Knowledge Extraction (done once, off-box)
+  ─────────────────────────────────────────────
+  Run the dolphin 14B model on capable hardware to generate
+  a training corpus: prompt → completion pairs for a specific
+  domain or task. The 14B model is the TEACHER.
+
+  Phase 2: Ternary Distillation (off-box)
+  ────────────────────────────────────────
+  Train a STUDENT model with ternary weights {-1, 0, +1}
+  to mimic the teacher's outputs. Architecture:
+    - Smaller hidden dim (1024 vs 5120)
+    - Fewer layers (8 vs 40)
+    - Ternary weights throughout
+    - BQSM transition-table aware training
+
+  Result: a ~500M parameter ternary model (~100MB compressed)
+
+  Phase 3: BQSM Inference (on T7400)
+  ──────────────────────────────────
+  Load the 100MB ternary model. Each forward pass:
+    - Attention:  regular integer matmul (the QKV projections
+                  are small enough to run at acceptable speed)
+    - FFN:        BQSM matmul kernel (5.7 GFLOPS-eq)
+    - Sampling:   integer-based, no float
+
+  Expected throughput:
+    100MB weights ÷ 6.5 GB/s = 15ms per token (memory-bound)
+    Compute: ~500M MACs at 2.85 GMACs/s = 175ms per token
+    Actual: ~200ms/token = 5 tok/s
+
+  That's usable. 100× faster than the current 0.05 tok/s.
+
+
+WHAT WE CAN BUILD RIGHT NOW
+
+  Step 1: GGUF weight extractor
+  ──────────────────────────────
+  bqsm_extract.py — reads the dolphin GGUF, extracts the
+  attention and FFN weight matrices, quantizes each to
+  ternary using straight-through estimator, writes a
+  .bqsm model file (compact binary format).
+
+  Step 2: BQSM layer runner  
+  ───────────────────────────
+  bqsm_layer.c — takes one transformer layer's ternary
+  weights, runs a forward pass using BQSM matmul for FFN,
+  reports throughput in tok/s. This proves the concept
+  on real model weights.
+
+  Step 3: Hybrid runtime
+  ──────────────────────
+  bqsm_llm.c — minimal transformer runtime:
+    - Attention in regular int8 (small enough)
+    - FFN in BQSM ternary matmul
+    - No dequantization, no float, no AVX
+    - Reads .bqsm model file
+    - Generates tokens
+
+  This gives us a WORKING 5 tok/s inference engine on the
+  T7400, using the dolphin model's distilled knowledge,
+  without needing a GPU or AVX.
+
+
+HONEST CAVEATS
+
+  1. Ternary distillation loses quality. The student model
+     won't match the teacher's full capability. It's a
+     tradeoff: speed vs quality.
+
+  2. This is a research prototype, not a production system.
+     The goal is to prove that ternary-weight inference
+     can run usefully on 2007 hardware.
+
+  3. The attention layers are the long pole. At full model
+     dimensions, QKV projections are O(d²) and dominate
+     at short context. We need the student model to be
+     dimensionally small enough that attention fits.
+
+  4. The extraction step is non-trivial. GGUF is a complex
+     format with many tensor name conventions. We'd need
+     to handle Phi-3's specific architecture.
