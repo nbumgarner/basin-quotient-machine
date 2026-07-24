@@ -312,39 +312,36 @@ static char *generate(const char *prompt){
     /* ── lm_head: tied embedding projection + argmax ──────────── */
     char prediction[256] = "";
     if (final_hidden && emb) {
-        int32_t best_logit = INT32_MIN;
-        int best_token = 0;
         int vocab_n = (int)emb->shape[1];  /* 256000 */
-        /* Sample: check every 128th token across full vocab for speed */
-        for (int tid = 0; tid < vocab_n; tid += 128) {
-            const uint8_t *row = emb_data + (size_t)tid * (size_t)stride;
-            int32_t dot = 0;
-            /* Compute dot product over int8 hidden × ternary embedding */
-            for (int i = 0; i < dm; i++) {
-                int byte_idx = i / 4;
-                int shift    = (i & 3) * 2;
-                int nb       = (row[byte_idx] >> shift) & 3;
-                static const int8_t tern[4] = {-1, 0, 1, 0};
-                dot += (int32_t)final_hidden[i] * (int32_t)tern[nb];
+        /* Full argmax via signed SIMD kernel (bqsm_matmul_vec).
+         * final_hidden [d_model] × token_embd [d_model, vocab] → logits [vocab].
+         * 590M MACs — ~0.2s at 2.8 GMAC/s standalone rate. */
+        int32_t *logits = calloc((size_t)vocab_n, sizeof(int32_t));
+        if (logits) {
+            bqsm_matmul_vec(final_hidden, emb->data, dm, vocab_n, logits);
+            int32_t best_logit = INT32_MIN;
+            int best_token = 0;
+            for (int tid = 0; tid < vocab_n; tid++) {
+                if (logits[tid] > best_logit) {
+                    best_logit = logits[tid];
+                    best_token = tid;
+                }
             }
-            if (dot > best_logit) {
-                best_logit = dot;
-                best_token = tid;
+            free(logits);
+            /* Look up token string */
+            for (int i = 0; i < SP_VOCAB_SIZE; i++) {
+                if ((int)sp_vocab_index[i].id == best_token) {
+                    int mlen = sp_vocab_index[i].len;
+                    int off  = sp_vocab_index[i].off;
+                    int nc = mlen < 60 ? mlen : 60;
+                    memcpy(prediction, sp_vocab_data + off, (size_t)nc);
+                    prediction[nc] = 0;
+                    break;
+                }
             }
+            snprintf(prediction + strlen(prediction), sizeof(prediction) - strlen(prediction),
+                     " (id=%d, logit=%d)", best_token, best_logit);
         }
-        /* Look up token string */
-        for (int i = 0; i < SP_VOCAB_SIZE; i++) {
-            if ((int)sp_vocab_index[i].id == best_token) {
-                int mlen = sp_vocab_index[i].len;
-                int off  = sp_vocab_index[i].off;
-                int nc = mlen < 60 ? mlen : 60;
-                memcpy(prediction, sp_vocab_data + off, (size_t)nc);
-                prediction[nc] = 0;
-                break;
-            }
-        }
-        snprintf(prediction + strlen(prediction), sizeof(prediction) - strlen(prediction),
-                 " (id=%d, logit=%d)", best_token, best_logit);
     }
     free(final_hidden);
 
