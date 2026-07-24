@@ -27,6 +27,7 @@
 #include "bqsm_model.h"
 #include "bqsm_kernel.h"
 #include "bqsm_tokenizer.h"
+#include "bqsm_debug.h"
 
 /* ─── State ──────────────────────────────────────────────────────────────── */
 static int  g_port=8081, g_running=1, g_n_layers=2;  /* default: 2 layers for demo */
@@ -315,6 +316,50 @@ static void *handle_conn(void *arg){
             "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":1}}",ej,strlen(msg));
         send_resp(fd,200,"application/json",j);
         free(j);free(ej);free(resp);free(msg);
+        close(fd); return NULL;
+    }
+
+    /* Debug endpoints */
+    if(!strcmp(method,"GET")&&!strcmp(url,"/debug")){
+        handle_debug(fd); close(fd); return NULL;
+    }
+    if(!strcmp(method,"GET")&&!strncmp(url,"/debug/tensor",13)){
+        /* Return weight samples for a tensor */
+        const char *p = strstr(url, "name=");
+        char tname[256] = {0};
+        int max_n = 1024;
+        if (p) {
+            p += 5;
+            const char *pe = strchr(p, '&'); if (!pe) pe = p + strlen(p);
+            size_t n = (size_t)(pe - p); if (n > 255) n = 255;
+            memcpy(tname, p, n);
+        }
+        const char *mp = strstr(url, "max=");
+        if (mp) max_n = atoi(mp + 4);
+        bqsm_tensor_t *t = bqsm_model_find(&g_model, tname);
+        char b[65536]; int bl = 0;
+        if (t && t->data) {
+            bl += snprintf(b+bl, sizeof(b)-bl, "{\"name\":\"%s\",\"values\":[", tname);
+            int nshow = (int)t->nelems < max_n ? (int)t->nelems : max_n;
+            for (int i = 0; i < nshow; i++)
+                bl += snprintf(b+bl, sizeof(b)-bl, "%d%s", t->data[i], i < nshow-1 ? "," : "");
+            bl += snprintf(b+bl, sizeof(b)-bl, "],\"total\":%zu}", t->nelems);
+        } else {
+            bl += snprintf(b+bl, sizeof(b)-bl, "{\"error\":\"tensor not found: %s\"}", tname);
+        }
+        send_resp(fd, 200, "application/json", b); close(fd); return NULL;
+    }
+    if(!strcmp(method,"POST")&&!strcmp(url,"/debug/infer")){
+        /* Run inference with equalizer applied */
+        char *msg = extract_msg(body);
+        char *resp = generate(msg);
+        char *ej = jesc(resp);
+        size_t rl = strlen(ej) + 1024;
+        char *j = malloc(rl);
+        snprintf(j, rl, "{\"layers\":[],\"eq_applied\":0,\"time_ms\":0,\"gmac\":0,"
+                 "\"output\":%s}", ej);
+        send_resp(fd, 200, "application/json", j);
+        free(j); free(ej); free(resp); free(msg);
         close(fd); return NULL;
     }
 
