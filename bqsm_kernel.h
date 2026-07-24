@@ -1,13 +1,10 @@
 /* ===========================================================================
- * bqsm_kernel.h — BQSM Matmul Kernels (scalar + pshufb SIMD)
+ * bqsm_kernel.h — BQSM Matmul Kernels (scalar + pshufb SIMD, cache-optimized)
  * ===========================================================================
- *   Single header. Auto-detects SSSE3 at compile time.
- *   Provides:
- *     bqsm_matmul_vec()  — vector × matrix → output vector
- *     bqsm_matmul_batch() — batch × matrix → batch output
+ *   v2: Swapped loop nest — k outer, j inner. W streamed contiguously.
+ *   Accumulators held across row: fits L1 for N≤2048, panels for N>2048.
  *
- *   All operations are integer table-lookup: C[j] = sum_k TT[A[k], W[k,j]]
- *   4-state (2-bit) encoding. TT is 16-entry int8 table.
+ *   C[j] = sum_k TT[x[k], W[k*N+j]]   for M input dims, N output dims
  */
 
 #ifndef BQSM_KERNEL_H
@@ -21,7 +18,6 @@
 #include <tmmintrin.h>
 #endif
 
-/* ─── Transition Table ──────────────────────────────────────────────────── */
 #define BQSM_Q 3
 static int8_t bqsm_tt[16] __attribute__((aligned(16)));
 
@@ -33,68 +29,76 @@ static inline void bqsm_tt_init(void) {
         }
 }
 
-/* ─── Scalar Matmul ─────────────────────────────────────────────────────── */
-/* C[j] = sum_k TT[x[k], W[k*N+j]]   x: M, W: M×N, C: N */
+/* ─── Scalar fallback ───────────────────────────────────────────────────── */
 static inline void bqsm_matmul_vec_scalar(const int8_t *x, const int8_t *W,
                                           int M, int N, int32_t *C) {
-    for (int j = 0; j < N; j++) {
-        int32_t acc = 0;
-        for (int k = 0; k < M; k++)
-            acc += bqsm_tt[((int)x[k] << 2) | (int)W[k * N + j]];
-        C[j] = acc;
+    /* k-outer for contiguous W access */
+    memset(C, 0, N * sizeof(int32_t));
+    for (int k = 0; k < M; k++) {
+        int a = (int)x[k] << 2;
+        const int8_t *Wrow = W + k * N;
+        for (int j = 0; j < N; j++)
+            C[j] += bqsm_tt[a | (int)Wrow[j]];
     }
 }
 
-/* ─── SIMD Matmul (SSSE3: pshufb) ──────────────────────────────────────── */
+/* ─── SIMD (SSSE3: pshufb, k-outer, contiguous W stream) ──────────────── */
 #ifdef __SSSE3__
-static inline void bqsm_matmul_vec_sse(const int8_t *x, const int8_t *W,
-                                       int M, int N, int32_t *C) {
-    /* Load TT into XMM register once */
-    __m128i tt = _mm_load_si128((__m128i*)bqsm_tt);
+
+/* Panel size: keep accumulators in L1D (32KB).
+ * int32 accs: PANEL ≤ 8192 to fit 32KB.
+ * Use PANEL=2048 for safety with other L1 uses. */
+#define BQSM_PANEL 2048
+
+/* Process a panel of N columns at a time, streaming W contiguously.
+ * Called with pre-zeroed accumulator panel C[0..np-1]. */
+static inline void bqsm_sse_panel(const int8_t *x, const int8_t *W,
+                                  int M, int N, int np, int32_t *C) {
+    __m128i tt   = _mm_load_si128((__m128i*)bqsm_tt);
     __m128i zero = _mm_setzero_si128();
+    __m128i mask3 = _mm_set1_epi8(3);
 
-    int j = 0;
-    /* Process 16 output columns at a time */
-    for (; j + 15 < N; j += 16) {
-        __m128i acc0 = zero, acc1 = zero, acc2 = zero, acc3 = zero;
+    /* k-outer: stream W rows contiguously */
+    for (int k = 0; k < M; k++) {
+        int a = (int)x[k];
+        __m128i a4 = _mm_set1_epi8((char)(a << 2));
+        const int8_t *Wrow = W + k * N;
 
-        for (int k = 0; k < M; k++) {
-            int a = (int)x[k];
-            /* Broadcast activation into all 16 lanes, shifted to TT index */
-            __m128i a4 = _mm_set1_epi8((char)(a << 2));
-
-            /* Load 16 weight values, mask to 4-state */
-            __m128i w = _mm_loadu_si128((__m128i*)&W[k * N + j]);
-            w = _mm_and_si128(w, _mm_set1_epi8(3));
+        int j = 0;
+        for (; j + 15 < np; j += 16) {
+            /* Load 16 contiguous weight bytes — hardware prefetcher engages */
+            __m128i w = _mm_loadu_si128((__m128i*)&Wrow[j]);
+            w = _mm_and_si128(w, mask3);
 
             /* pshufb: TT[activation | weight] → 16 results */
-            __m128i idx = _mm_or_si128(a4, w);
-            __m128i prod = _mm_shuffle_epi8(tt, idx);
+            __m128i prod = _mm_shuffle_epi8(tt, _mm_or_si128(a4, w));
 
-            /* Zero-extend int8 → int32 (values are 0..3, non-negative) */
+            /* Zero-extend int8 → int32, accumulate */
             __m128i p0 = _mm_unpacklo_epi16(_mm_unpacklo_epi8(prod, zero), zero);
             __m128i p1 = _mm_unpackhi_epi16(_mm_unpacklo_epi8(prod, zero), zero);
             __m128i p2 = _mm_unpacklo_epi16(_mm_unpackhi_epi8(prod, zero), zero);
             __m128i p3 = _mm_unpackhi_epi16(_mm_unpackhi_epi8(prod, zero), zero);
 
-            acc0 = _mm_add_epi32(acc0, p0);
-            acc1 = _mm_add_epi32(acc1, p1);
-            acc2 = _mm_add_epi32(acc2, p2);
-            acc3 = _mm_add_epi32(acc3, p3);
+            __m128i *cp = (__m128i*)&C[j];
+            cp[0] = _mm_add_epi32(cp[0], p0);
+            cp[1] = _mm_add_epi32(cp[1], p1);
+            cp[2] = _mm_add_epi32(cp[2], p2);
+            cp[3] = _mm_add_epi32(cp[3], p3);
         }
 
-        _mm_storeu_si128((__m128i*)&C[j + 0],  acc0);
-        _mm_storeu_si128((__m128i*)&C[j + 4],  acc1);
-        _mm_storeu_si128((__m128i*)&C[j + 8],  acc2);
-        _mm_storeu_si128((__m128i*)&C[j + 12], acc3);
+        /* Scalar tail */
+        for (; j < np; j++)
+            C[j] += bqsm_tt[a | (int)Wrow[j]];
     }
+}
 
-    /* Scalar tail */
-    for (; j < N; j++) {
-        int32_t acc = 0;
-        for (int k = 0; k < M; k++)
-            acc += bqsm_tt[((int)x[k] << 2) | (int)W[k * N + j]];
-        C[j] = acc;
+/* Full vector matmul: split into panels if N > BQSM_PANEL */
+static inline void bqsm_matmul_vec_sse(const int8_t *x, const int8_t *W,
+                                       int M, int N, int32_t *C) {
+    memset(C, 0, N * sizeof(int32_t));
+    for (int j0 = 0; j0 < N; j0 += BQSM_PANEL) {
+        int np = (j0 + BQSM_PANEL <= N) ? BQSM_PANEL : N - j0;
+        bqsm_sse_panel(x, W + j0, M, N, np, C + j0);
     }
 }
 #endif
