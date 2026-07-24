@@ -52,18 +52,30 @@ typedef struct {
     int     is_local; /* enforce sliding window */
 } att_kv_cache_t;
 
+static void att_kv_free(att_kv_cache_t *c, int n_layers);
+
 static att_kv_cache_t *att_kv_alloc(int n_layers, int global_seq, int local_seq) {
     att_kv_cache_t *c = calloc((size_t)n_layers, sizeof(att_kv_cache_t));
-    if (!c) return NULL;
+    if (!c) { fprintf(stderr, "KV alloc: OOM for %d layer structs\n", n_layers); return NULL; }
+    size_t total = 0;
     for (int L = 0; L < n_layers; L++) {
         int cap = att_is_local(L) ? local_seq : global_seq;
         size_t sz = (size_t)ATT_N_KV_HEADS * (size_t)cap * ATT_HEAD_DIM;
-        c[L].k = calloc(sz, 1);
-        c[L].v = calloc(sz, 1);
+        c[L].k = calloc(1, sz);
+        c[L].v = calloc(1, sz);
+        if (!c[L].k || !c[L].v) {
+            fprintf(stderr, "KV alloc: layer %d OOM (cap=%d, sz=%zu MB)\n",
+                    L, cap, sz >> 20);
+            att_kv_free(c, n_layers);
+            return NULL;
+        }
         c[L].max_seq = cap;
         c[L].seq_len = 0;
         c[L].is_local = att_is_local(L);
+        total += sz * 2;
     }
+    fprintf(stderr, "KV cache: %d layers, %.1f MB total (global=%d local=%d)\n",
+            n_layers, total / (1024.0*1024.0), global_seq, local_seq);
     return c;
 }
 

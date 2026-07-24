@@ -80,23 +80,20 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     int8_t *tmp=malloc(ff>dm?ff:dm);
     int32_t *acc=malloc((ff>dm?ff:dm)*sizeof(int32_t));
     int32_t *o_raw=malloc(dm * sizeof(int32_t));  /* raw O-projection accumulator */
+    int nl_used = g_n_layers < m->n_layers ? g_n_layers : m->n_layers;
 
-    /* One-time KV cache allocation */
+    /* One-time KV cache allocation — sized for actual layers used */
     if (!g_kv_caches) {
-        g_kv_caches = att_kv_alloc(nl, 8192, ATT_LOCAL_WINDOW);
-        printf("KV caches: %d layers × %d/%d KV heads, global=%d local=%d\n",
-               nl, ATT_N_KV_HEADS, ATT_N_Q_HEADS, 8192, ATT_LOCAL_WINDOW);
+        g_kv_caches = att_kv_alloc(nl_used, 8192, ATT_LOCAL_WINDOW);
     }
 
     /* Per-layer stats */
-    struct { float gate_m, up_m, down_m, act_m, attn_m; } stats[26];
+    struct { float gate_m, up_m, down_m, act_m, attn_m, min, max; float l2; } stats[26];
     int nstats=0;
 
     int64_t total_macs=0;
     struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
     char name[256];
-
-    int nl_used = g_n_layers < m->n_layers ? g_n_layers : m->n_layers;
 
     for(int L=0;L<nl_used;L++){
         /* ── Attention ─────────────────────────────────────────────── */
@@ -162,10 +159,17 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
             }
         }
 
-        /* Track per-layer activation mean */
+        /* Track per-layer activation mean + range + L2 */
         if(nstats<26){
-            float am=0; for(int i=0;i<dm;i++) am+=x[i];
-            stats[nstats].act_m=am/dm; nstats++;
+            float am=0, mn=(float)x[0], mx=(float)x[0]; double l2=0;
+            for(int i=0;i<dm;i++){
+                float v=(float)x[i]; am+=v; l2+=(double)v*v;
+                if(v<mn)mn=v; if(v>mx)mx=v;
+            }
+            stats[nstats].act_m=am/dm;
+            stats[nstats].min=mn; stats[nstats].max=mx;
+            stats[nstats].l2=(float)sqrt(l2/dm);
+            nstats++;
         }
     }
 
@@ -191,15 +195,16 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
         "═══ BQSM Multi-Layer Forward Pass (Attention + FFN) ═══\n"
         "Gemma 2B  %d/%d layers  d=%d  FFN=%d  head_dim=%d  GQA %dQ/%dKV\n"
         "Total: %.2f GMAC  %.3fs  %.1f GMAC/s\n\n"
-        "Per-layer activation mean (post-attention+FFN, 0-3 scale):\n"
-        "Layer │ attn_mean │ act_mean\n"
-        "──────┼───────────┼──────────\n",
+        "Per-layer diagnostics (post-attention+FFN, 0-3 scale):\n"
+        "Layer │ attn_m │ act_m │ min │ max │ L2\n"
+        "──────┼────────┼───────┼─────┼─────┼─────\n",
         nl_used,m->n_layers,dm,ff,hd,ATT_N_Q_HEADS,ATT_N_KV_HEADS,
         total_macs*1e-9,elapsed,total_macs*1e-9/elapsed);
 
     for(int i=0;i<nstats;i++)
-        off+=snprintf(r+off,16384-off," %4d  │ %9.2f │ %8.2f\n",
-            i, stats[i].attn_m, stats[i].act_m);
+        off+=snprintf(r+off,16384-off," %4d  │ %6.2f │ %5.2f │ %3.0f │ %3.0f │ %4.1f\n",
+            i, stats[i].attn_m, stats[i].act_m,
+            stats[i].min, stats[i].max, stats[i].l2);
 
     off+=snprintf(r+off,16384-off,
         "\nPeak output: dim[%d] = %.1f (capped: %.1f with tanh(×%.0f))\n"

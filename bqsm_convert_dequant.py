@@ -36,7 +36,7 @@ def dequant_q4(raw, nelems):
         sc_br[:, s*32:(s+1)*32] = sc[:, s:s+1]
     
     d_br = d.reshape(nb, 1)
-    return (nib * d_br * sc_br / 16.0).ravel()[:nelems]
+    return (nib * d_br * sc_br).ravel()[:nelems]
 
 def dequant_q6(raw, nelems, chunk_blks=32768):
     """Q6_K: 210B/block. fp16 d + 16 8-bit scales. Chunked for large tensors."""
@@ -69,7 +69,7 @@ def dequant_q6(raw, nelems, chunk_blks=32768):
             sc_br[:, s*16:(s+1)*16] = scales[:, s:s+1]
         
         d_br = d.reshape(nbc, 1)
-        result[start*256:end*256] = (vals * d_br * sc_br / 64.0).ravel()
+        result[start*256:end*256] = (vals * d_br * sc_br).ravel()
     
     return result[:nelems]
 
