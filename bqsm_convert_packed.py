@@ -55,11 +55,16 @@ rng = np.random.RandomState(42)
 def gen_bqsm(shape, dtype):
     n = int(np.prod(shape))
     if dtype == 'F32' and len(shape) == 1:
-        data = np.clip(np.round(rng.normal(1.0, 0.3, n) * 1.5 + 1.5), 0, Q_STATES-1).astype(np.int8)
-    elif dtype == 'F32':
-        data = rng.randint(0, Q_STATES, n, dtype=np.int8)
+        # Norm weights: center at 2, tight spread
+        data = np.clip(np.round(rng.normal(2.0, 0.5, n)), 0, Q_STATES-1).astype(np.int8)
     else:
-        data = rng.randint(0, Q_STATES, n, dtype=np.int8)
+        # Matrix: bias toward center values (1,2) to prevent saturation
+        # randint + lookup table remap (no big intermediate arrays)
+        data = rng.randint(0, 100, n, dtype=np.int8)
+        # Remap: 0-9→0, 10-44→1, 45-84→2, 85-99→3  (10%/35%/40%/15%)
+        lut = np.zeros(100, dtype=np.int8)
+        lut[10:45] = 1; lut[45:85] = 2; lut[85:100] = 3
+        data = lut[data]   # fancy indexing, in-place-ish
     return data
 
 # ── Build tensor list ──

@@ -276,6 +276,18 @@ static void *handle_conn(void *arg){
         send_resp(fd,200,"application/json",b); close(fd); return NULL;
     }
 
+    if(!strcmp(method,"POST")&&!strcmp(url,"/v1/images/generations")){
+        /* Image generation stub — BQSM image models not yet integrated */
+        const char *j="{\"created\":0,\"data\":[{\"url\":\"\",\"revised_prompt\":\"BQSM image generation endpoint — model integration in progress\"}]}";
+        send_resp(fd,200,"application/json",j); close(fd); return NULL;
+    }
+
+    if(!strcmp(method,"POST")&&!strcmp(url,"/v1/video/generations")){
+        /* Video generation stub */
+        const char *j="{\"created\":0,\"data\":[{\"url\":\"\",\"status\":\"BQSM video generation — coming soon\"}]}";
+        send_resp(fd,200,"application/json",j); close(fd); return NULL;
+    }
+
     if(!strcmp(method,"POST")&&!strcmp(url,"/v1/chat/completions")){
         char *msg=extract_msg(body);
         char *resp=generate(msg);
