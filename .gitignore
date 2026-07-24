@@ -1,6 +1,30 @@
 __pycache__/
+*.pyc
+*.o
+
+# Build artifacts
+bqsm_server
+bqsm_inference
+bqsm_matmul
+bqsm_simd
+bqsm_load
+bqsm_load_test
+bqsm_batch
+bqsm_inf
+bqsm_vm
+ring_furnace
+ring_furnace_dt
+ring_furnace_ref
 basin_machine
 basin_dumper
-ring_furnace
+fs_check
+
+# Generated media
 basin_machine.mp4
-*.pyc
+
+# Archives
+*.tar.gz
+
+# Data
+*.csv
+*.bqsm

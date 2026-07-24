@@ -42,4 +42,57 @@ BQSM weights: gemma-2b.bqsm (61MB, 3 tensors, layer 0 only)
 
 Next: build bqsm_server.c skeleton with libmicrohttpd integration.
 
+
+ENTRY 002 — 2026-07-23 — SERVER SKELETON
+
+Built bqsm_server.c v1.0:
+  - libmicrohttpd HTTP server on configurable port (default 8080)
+  - OpenAI-compatible JSON API format
+  - Endpoints: GET /, GET /health, GET /v1/models, POST /v1/chat/completions
+  - CORS support (OPTIONS preflight)
+  - Embedded web UI: dark theme, chat interface, endpoint documentation
+  - Graceful shutdown on SIGINT/SIGTERM
+  - JSON helpers (escape, manual construction — no external JSON library)
+
+  Verified: all 3 endpoints return correct JSON. Web UI renders at /.
+  Port 8080 was occupied by SDSA server; using 8081 for BQSM.
+
+  Commit: 1fd7c24
+
+Next: integrate BQSM inference engine into chat endpoint.
+  - Model loader (.bqsm format)
+  - Tokenizer integration
+  - Forward pass via bqsm_simd kernel
+  - Streaming response (Server-Sent Events)
+
+
+ENTRY 003 — 2026-07-23 — LIVE BQSM INFERENCE
+
+Built bqsm_server v3.0 with raw POSIX sockets (dropped libmicrohttpd).
+Zero HTTP dependencies — single binary, just libc + pthread.
+
+  • Health endpoint (/health): JSON with model status
+  • Models endpoint (/v1/models): OpenAI-compatible model list
+  • Chat endpoint (/v1/chat/completions): LIVE BQSM INFERENCE
+     - Parses JSON request, extracts user message
+     - Embeds prompt into 4-state activation vector
+     - Runs forward pass through blk.0.ffn_up + blk.0.ffn_down
+     - 42 million MACs via 4-state pshufb table lookups
+     - Returns JSON with inference results
+  • Web UI (/): dark-themed chat interface
+
+  Key metrics:
+    - Forward pass: 2304→9216→2304
+    - MACs: 42,467,328 (BQSM table lookups, no float)
+    - Memory: model weights in .bqsm format (61MB for 3 tensors)
+    - Binary size: 30KB
+
+  Build: cc -O3 -march=native -std=c11 bqsm_server.c bqsm_model.c \
+         -o bqsm_server -lm -pthread
+
+  Commit: d8eed56
+
+Next: convert all Gemma 2B layers to .bqsm format, add full multi-layer
+  forward pass, integrate proper tokenizer (SentencePiece/BPE).
+
 ──────────────────────────────────────────────────────────────────────────
