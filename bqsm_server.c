@@ -346,11 +346,19 @@ static void *handle_conn(void *arg){
         bqsm_tensor_t *t = bqsm_model_find(&g_model, tname);
         char b[65536]; int bl = 0;
         if (t && t->data) {
-            bl += snprintf(b+bl, sizeof(b)-bl, "{\"name\":\"%s\",\"values\":[", tname);
             int nshow = (int)t->nelems < max_n ? (int)t->nelems : max_n;
-            for (int i = 0; i < nshow; i++)
-                bl += snprintf(b+bl, sizeof(b)-bl, "%d%s", t->data[i], i < nshow-1 ? "," : "");
-            bl += snprintf(b+bl, sizeof(b)-bl, "],\"total\":%zu}", t->nelems);
+            bl += snprintf(b+bl, sizeof(b)-bl, "{\"name\":\"%s\",\"packed\":true,\"values\":[", tname);
+            /* Weights are packed 2-bit: unpack inline */
+            const uint8_t *pk = (const uint8_t*)t->data;
+            int shown = 0;
+            for (int i = 0; i < nshow && shown < max_n; i++) {
+                uint8_t byte = pk[i / 4];
+                int nibble = (byte >> (2 * (i % 4))) & 3;
+                bl += snprintf(b+bl, sizeof(b)-bl, "%d%s", nibble, shown < nshow-1 ? "," : "");
+                shown++;
+            }
+            bl += snprintf(b+bl, sizeof(b)-bl, "],\"total\":%zu,\"packed_bytes\":%zu}",
+                          t->nelems, t->nelems / 4);
         } else {
             bl += snprintf(b+bl, sizeof(b)-bl, "{\"error\":\"tensor not found: %s\"}", tname);
         }

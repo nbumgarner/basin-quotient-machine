@@ -9,25 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Unpack 4-state (2-bit) packed bytes to int8 array.
- * Each packed byte yields 4 int8 values [0..3].
- * Returns number of unpacked values (= nelems). */
-static size_t unpack_4state(const uint8_t *packed, size_t packed_len,
-                            size_t nelems, int8_t *out) {
-    size_t written = 0;
-    for (size_t i = 0; i < packed_len && written < nelems; i++) {
-        uint8_t b = packed[i];
-        out[written++] = (int8_t)(b & 3);
-        if (written >= nelems) break;
-        out[written++] = (int8_t)((b >> 2) & 3);
-        if (written >= nelems) break;
-        out[written++] = (int8_t)((b >> 4) & 3);
-        if (written >= nelems) break;
-        out[written++] = (int8_t)((b >> 6) & 3);
-    }
-    return written;
-}
-
 int bqsm_model_load(bqsm_model_t *m, const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) { perror(path); return -1; }
@@ -63,53 +44,47 @@ int bqsm_model_load(bqsm_model_t *m, const char *path) {
     if (fread(&nt, 4, 1, f) != 1) { fclose(f); return -1; }
     m->n_tensors = (int)nt;
 
-    /* First pass: compute unpacked data size from tensor headers */
-    size_t total_unpacked = 0;
+    /* First pass: compute total PACKED data size (no unpacking) */
+    size_t total_data = 0;
     long   data_offsets[BQSM_MAX_TENSORS];
-    size_t tensor_nelems[BQSM_MAX_TENSORS];
     size_t packed_lens[BQSM_MAX_TENSORS];
+    size_t tensor_nelems_raw[BQSM_MAX_TENSORS];
 
     for (int ti = 0; ti < m->n_tensors; ti++) {
         uint16_t nl; fread(&nl, 2, 1, f);
-        fseek(f, nl, SEEK_CUR); /* skip name */
+        fseek(f, nl, SEEK_CUR);
         uint8_t nd; fread(&nd, 1, 1, f);
-        uint64_t shape[BQSM_MAX_DIMS];
-        size_t ne = 1;
-        for (int d = 0; d < nd; d++) {
-            fread(&shape[d], 8, 1, f);
-            ne *= (size_t)shape[d];
-        }
+        fseek(f, nd * 8, SEEK_CUR);  /* skip dims */
 
         if (is_v3) {
             uint32_t orig_n, packed_n;
             fread(&orig_n, 4, 1, f);
             fread(&packed_n, 4, 1, f);
-            tensor_nelems[ti] = (size_t)orig_n;
-            packed_lens[ti]   = (size_t)packed_n;
-            data_offsets[ti]  = (long)total_unpacked;
-            total_unpacked += (size_t)orig_n;
+            tensor_nelems_raw[ti] = (size_t)orig_n;
+            packed_lens[ti]       = (size_t)packed_n;
+            data_offsets[ti]      = (long)total_data;
+            total_data += (size_t)packed_n;
             fseek(f, (long)packed_n, SEEK_CUR);
         } else {
-            /* v1: raw int8 data */
             uint32_t dl; fread(&dl, 4, 1, f);
-            tensor_nelems[ti] = (size_t)dl;
-            packed_lens[ti]   = 0;
-            data_offsets[ti]  = (long)total_unpacked;
-            total_unpacked += (size_t)dl;
+            tensor_nelems_raw[ti] = (size_t)dl;
+            packed_lens[ti]       = (size_t)dl;
+            data_offsets[ti]      = (long)total_data;
+            total_data += (size_t)dl;
             fseek(f, (long)dl, SEEK_CUR);
         }
     }
 
-    /* Allocate arena */
-    m->arena = malloc(total_unpacked);
+    /* Allocate arena — PACKED size (4× smaller than unpacked) */
+    m->arena = malloc(total_data);
     if (!m->arena) {
-        fprintf(stderr, "bqsm_model: alloc %zu failed\n", total_unpacked);
+        fprintf(stderr, "bqsm_model: alloc %zu failed\n", total_data);
         fclose(f); return -1;
     }
-    m->arena_size = total_unpacked;
-    memset(m->arena, 0, total_unpacked);
+    m->arena_size = total_data;
+    memset(m->arena, 0, total_data);
 
-    /* Second pass: read + unpack */
+    /* Second pass: read packed bytes directly into arena */
     long hdr_end = (ver >= 2) ? (4 + 4 + 24 + 4) : (4 + 4 + 4);
     fseek(f, hdr_end, SEEK_SET);
 
@@ -126,10 +101,9 @@ int bqsm_model_load(bqsm_model_t *m, const char *path) {
         t->nelems = 1;
         for (int d = 0; d < nd; d++) {
             fread(&t->shape[d], 8, 1, f);
-            t->nelems *= (size_t)t->shape[d];
+            t->nelems *= (size_t)t->shape[d];  /* logical element count */
         }
 
-        size_t nelems  = tensor_nelems[ti];
         size_t packed_n = packed_lens[ti];
         t->data = (int8_t*)((char*)m->arena + data_offsets[ti]);
 
@@ -137,12 +111,8 @@ int bqsm_model_load(bqsm_model_t *m, const char *path) {
             uint32_t orig_n, pn;
             fread(&orig_n, 4, 1, f);
             fread(&pn, 4, 1, f);
-            /* Read packed data to temp, then unpack */
-            uint8_t *tmp = (uint8_t*)malloc(packed_n);
-            if (!tmp) { fclose(f); return -1; }
-            fread(tmp, 1, packed_n, f);
-            unpack_4state(tmp, packed_n, nelems, t->data);
-            free(tmp);
+            /* Read packed bytes directly — no unpacking */
+            fread(t->data, 1, packed_n, f);
         } else {
             uint32_t dl; fread(&dl, 4, 1, f);
             fread(t->data, 1, dl, f);
