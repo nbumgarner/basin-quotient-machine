@@ -26,6 +26,7 @@
 #include <arpa/inet.h>
 #include "bqsm_model.h"
 #include "bqsm_kernel.h"
+#include "bqsm_tokenizer.h"
 
 /* ─── State ──────────────────────────────────────────────────────────────── */
 static int  g_port=8081, g_running=1, g_n_layers=2;  /* default: 2 layers for demo */
@@ -64,7 +65,7 @@ static void rms_norm(const int8_t *x, const int8_t *scale, int d, int8_t *out) {
 }
 
 /* ─── Full Forward Pass ─────────────────────────────────────────────────── */
-static char *forward_pass(const int8_t *embedding, int d_model) {
+static char *forward_pass(const int8_t *embedding, int d_model, const char *prompt) {
     if(!g_loaded)return strdup("No model loaded.");
     bqsm_model_t *m=&g_model;
     int dm=m->d_model, ff=m->ffn_dim, nl=m->n_layers;
@@ -149,9 +150,11 @@ static char *forward_pass(const int8_t *embedding, int d_model) {
 
     off+=snprintf(r+off,16384-off,
         "\nBQSM integer table-lookup matmul — no floating-point.\n"
+        "Tokenizer: %d tokens (character-level, %d vocab).\n"
         "Real Q4_K nibbles from Gemma 2B (623 MB model).\n"
-        "Full generation needs: trained BQSM weights + tokenizer.\n"
-        "Use --layers %d for full 26-layer pass.\n", m->n_layers);
+        "Full generation needs: SentencePiece tokenizer + trained weights.\n"
+        "Use --layers %d for full 26-layer pass.\n",
+        (int)strlen(prompt), BQSM_VOCAB_SIZE, m->n_layers);
 
     free(tmp);free(acc);free(x);
     return r;
@@ -162,16 +165,11 @@ static char *generate(const char *prompt){
     if(!g_loaded)return strdup("No model loaded.");
     int dm=g_model.d_model;
 
-    /* Simple embedding: hash prompt chars to activation */
+    /* Simple hash-based embedding from tokenizer header */
     int8_t *embed=malloc(dm);
-    memset(embed,2,dm); /* center at 2 */
-    size_t pl=strlen(prompt);
-    for(int i=0;i<dm;i++){
-        unsigned char c=(unsigned char)prompt[i%pl];
-        embed[i]=(int8_t)((c+prompt[(i*7+13)%pl])%(QS+1));
-    }
+    bqsm_embed(prompt, dm, embed);
 
-    char *result=forward_pass(embed,dm);
+    char *result=forward_pass(embed,dm,prompt);
     free(embed);
     return result;
 }
@@ -260,6 +258,32 @@ static void *handle_conn(void *arg){
         send_resp(fd,200,"application/json",b); close(fd); return NULL;
     }
 
+    if(!strcmp(method,"GET")&&!strcmp(url,"/v1/tokenize")){
+        const char *text = strstr(url, "text=");
+        if (!text) text = "hello";
+        else { text = strchr(text, '='); if (text) text++; else text = "hello"; }
+        char decoded[256] = {0};
+        /* URL-decode %20 → space etc */
+        const char *s = text; char *d = decoded; int rem = 254;
+        while (*s && rem > 0) {
+            if (*s == '%' && s[1] && s[2]) {
+                char hex[3] = {s[1], s[2], 0};
+                *d++ = (char)strtol(hex, NULL, 16);
+                s += 3; rem--;
+            } else { *d++ = *s++; rem--; }
+        }
+        *d = 0;
+        if (!decoded[0]) strcpy(decoded, "hello");
+        int *tokens; int n = bqsm_encode(decoded, &tokens);
+        char b[4096]; int bl=0;
+        bl+=snprintf(b+bl, sizeof(b)-bl,
+            "{\"text\":\"%s\",\"tokens\":[", text);
+        for(int i=0;i<n&&i<32;i++)
+            bl+=snprintf(b+bl, sizeof(b)-bl, "%d%s", tokens[i], i<n-1&&i<31?",":"");
+        bl+=snprintf(b+bl, sizeof(b)-bl, "],\"count\":%d,\"vocab\":%d}", n, BQSM_VOCAB_SIZE);
+        free(tokens);
+        send_resp(fd,200,"application/json",b); close(fd); return NULL;
+    }
     if(!strcmp(method,"GET")&&!strcmp(url,"/v1/models")){
         char b[512]; snprintf(b,sizeof(b),
             "{\"object\":\"list\",\"data\":[{\"id\":\"%s\",\"object\":\"model\","
