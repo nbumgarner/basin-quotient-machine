@@ -215,14 +215,15 @@ static char *generate(const char *prompt){
     if(!g_loaded)return strdup("No model loaded.");
     int dm=g_model.d_model;
 
-    /* Build normalized input: replace leading/trailing space with ▁ (U+2581).
-     * SentencePiece uses ▁ as word boundary marker. */
+    /* Build normalized input: prepend space, replace spaces with ▁,
+     * then strip the leading space. SentencePiece strips leading space;
+     * only internal word boundaries get ▁. */
     char norm[1024];
     int nl = snprintf(norm, sizeof(norm), " %s", prompt);
     if (nl >= (int)sizeof(norm)) nl = (int)sizeof(norm) - 1;
-    /* Replace spaces with ▁ (UTF-8: 0xE2 0x96 0x81) */
+    /* Replace spaces with ▁, but skip the leading one (at position 0) */
     char sp_norm[2048]; int sp_nl = 0;
-    for (int i = 0; i < nl && sp_nl < (int)sizeof(sp_norm) - 4; i++) {
+    for (int i = 1; i < nl && sp_nl < (int)sizeof(sp_norm) - 4; i++) {
         if (norm[i] == ' ') {
             sp_norm[sp_nl++] = (char)0xE2;
             sp_norm[sp_nl++] = (char)0x96;
@@ -241,7 +242,7 @@ static char *generate(const char *prompt){
     /* Prepend <bos> (ID 2). Shift tokens right, insert BOS at position 0. */
     if (n_tokens < 63) {
         memmove(token_ids + 1, token_ids, (size_t)n_tokens * sizeof(int32_t));
-        token_ids[0] = 1;  /* <bos> */
+        token_ids[0] = 2;  /* <bos> */
         n_tokens++;
     }
 
@@ -303,7 +304,7 @@ static char *generate(const char *prompt){
     int32_t *tid_check = NULL;
     int nt2 = sp_tokenize((const unsigned char*)sp_norm, sp_nl, 64, &tid_check);
     if (nt2 > 0) {
-        if (nt2 < 63) { memmove(tid_check+1, tid_check, (size_t)nt2*4); tid_check[0]=1 /* <bos> */; nt2++; }
+        if (nt2 < 63) { memmove(tid_check+1, tid_check, (size_t)nt2*4); tid_check[0]=2 /* <bos> */; nt2++; }
         for (int i = 0; i < nt2 && i < 10 && ti_off < (int)sizeof(token_info)-20; i++)
             ti_off += snprintf(token_info + ti_off, sizeof(token_info) - ti_off,
                 "%s%d", i?",":"", tid_check[i]);
