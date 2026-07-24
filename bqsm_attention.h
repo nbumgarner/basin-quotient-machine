@@ -132,7 +132,8 @@ static void bqsm_attention_layer(
     const bqsm_tensor_t *q_w, const bqsm_tensor_t *k_w,
     const bqsm_tensor_t *v_w, const bqsm_tensor_t *o_w,
     int layer, att_kv_cache_t *kv_cache,
-    int8_t *out, int32_t *o_raw)
+    int8_t *out, int32_t *o_raw,
+    float *attn_weights)  /* if non-NULL: [n_q_heads * max_seq] per-head weights */
 {
     int hd      = ATT_HEAD_DIM;
     int n_qh    = ATT_N_Q_HEADS;
@@ -159,6 +160,8 @@ static void bqsm_attention_layer(
     if (k_w) bqsm_matmul_vec(x, k_w->data, d_model, kv_dim, k_acc);
     if (v_w) bqsm_matmul_vec(x, v_w->data, d_model, kv_dim, v_acc);
 
+    float sc_q = 1.0f, sc_kv = 1.0f;  /* Q/K quantization scales, used in logit dequant */
+
     /* Quantize Q/K/V to signed int8 with target RMS matching input scale */
     {
         double sum_q=0, sum_k=0, sum_v=0;
@@ -166,8 +169,8 @@ static void bqsm_attention_layer(
         for (int i = 0; i < kv_dim; i++) { sum_k += (double)k_acc[i]*(double)k_acc[i]; sum_v += (double)v_acc[i]*(double)v_acc[i]; }
         float rms_q = (float)sqrt(sum_q/(double)q_dim + 1e-8);
         float rms_kv = (float)sqrt(sum_k/(double)kv_dim + 1e-8);
-        float sc_q = (rms_q > 1e-8f) ? 32.0f / rms_q : 1.0f;
-        float sc_kv = (rms_kv > 1e-8f) ? 32.0f / rms_kv : 1.0f;
+        sc_q = (rms_q > 1e-8f) ? 32.0f / rms_q : 1.0f;
+        sc_kv = (rms_kv > 1e-8f) ? 32.0f / rms_kv : 1.0f;
         for (int i = 0; i < q_dim;  i++) { int32_t v=(int32_t)lrintf((float)q_acc[i]*sc_q);   q_out[i]=(int8_t)(v<-128?-128:(v>127?127:v)); }
         for (int i = 0; i < kv_dim; i++) { int32_t v=(int32_t)lrintf((float)k_acc[i]*sc_kv);  k_out[i]=(int8_t)(v<-128?-128:(v>127?127:v)); }
         for (int i = 0; i < kv_dim; i++) { int32_t v=(int32_t)lrintf((float)v_acc[i]*sc_kv);  v_out[i]=(int8_t)(v<-128?-128:(v>127?127:v)); }
@@ -210,8 +213,11 @@ static void bqsm_attention_layer(
             int32_t dot = 0;
             for (int d = 0; d < hd; d++)
                 dot += (int32_t)q_head[d] * (int32_t)k_pos[d];
-            /* Scale by 1/sqrt(hd) */
-            float raw = (float)dot * scale;
+            /* Scale: 1/(RMS² * sqrt(hd)). RMS=32 is the target quantization scale.
+             * Q_int · K_int has magnitude 32² * 256 = 262K.
+             * Dividing by 32² * 16 = 16384 brings logits to float-space (~0-16). */
+            float logit_scale = 1.0f / (32.0f * 32.0f * 16.0f);
+            float raw = (float)dot * logit_scale;
             /* Logit soft-capping: capped = cap * tanh(raw / cap) */
             float capped = ATT_LOGIT_CAP * tanhf(raw / ATT_LOGIT_CAP);
             scores[n_valid++] = capped;
@@ -219,6 +225,18 @@ static void bqsm_attention_layer(
 
         /* Softmax */
         att_softmax(scores, n_valid);
+
+        /* Output attention weights if requested */
+        if (attn_weights) {
+            int max_s = kv->max_seq;
+            for (int p = 0; p < n_valid; p++)
+                attn_weights[qh * max_s + (first + p)] = scores[p];
+            /* Zero out masked positions */
+            for (int p = 0; p < first; p++)
+                attn_weights[qh * max_s + p] = 0.0f;
+            for (int p = seq_len; p < max_s; p++)
+                attn_weights[qh * max_s + p] = 0.0f;
+        }
 
         /* Weighted V sum */
         memset(head_out, 0, (size_t)hd * sizeof(float));

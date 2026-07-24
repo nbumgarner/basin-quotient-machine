@@ -38,6 +38,8 @@ static bqsm_model_t g_model;
 static int  g_loaded=0;
 static float g_eq[26][8];  /* per-layer 8-band equalizer gains */
 static att_kv_cache_t *g_kv_caches = NULL;  /* per-layer KV caches */
+static float *g_attn_weights = NULL;  /* [n_layers * n_q_heads * max_seq * max_seq] attention weights */
+static int g_attn_seq = 0;  /* current sequence position */
 
 /* ─── Quantization helpers ───────────────────────────────────────────────── */
 static inline float rms_of_i8(const int8_t *x, int d) {
@@ -124,7 +126,8 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
 
         if (qw && kw && vw && ow && g_kv_caches) {
             int8_t *attn_out = malloc(dm);
-            bqsm_attention_layer(tmp, dm, qw, kw, vw, ow, L, g_kv_caches, attn_out, o_raw);
+            bqsm_attention_layer(tmp, dm, qw, kw, vw, ow, L, g_kv_caches, attn_out, o_raw,
+                g_attn_weights ? g_attn_weights + (size_t)L * ATT_N_Q_HEADS * 8192 : NULL);
 
             /* Residual: int32 add x + o_raw at matched scale, requantize */
             for(int i=0;i<dm;i++) o_raw[i] += (int32_t)x[i];
@@ -254,6 +257,14 @@ static char *generate(const char *prompt){
 
     /* Process each token sequentially through the forward pass.
      * Each call populates one position in the KV cache. */
+    /* Allocate attention weight storage: [n_layers * n_q_heads * max_seq^2] */
+    int nl_used = g_n_layers < g_model.n_layers ? g_n_layers : g_model.n_layers;
+    int max_seq = n_tokens < 16 ? n_tokens : 16;
+    if (!g_attn_weights) {
+        g_attn_weights = calloc((size_t)nl_used * ATT_N_Q_HEADS * 8192, sizeof(float));
+    }
+    g_attn_seq = 0;
+
     char *last_result = NULL;
     for (int t = 0; t < n_tokens && t < 16; t++) {
         int tid = token_ids[t];
@@ -288,6 +299,7 @@ static char *generate(const char *prompt){
 
         /* Forward pass — accumulates KV cache, returns stats */
         char *result = forward_pass(embed, dm, prompt);
+        g_attn_seq++;
         free(embed);
         if (last_result) free(last_result);
         last_result = result;
@@ -295,6 +307,30 @@ static char *generate(const char *prompt){
 
     free(token_ids);
     if (!last_result) return strdup("No tokens processed.");
+
+    /* ── Attention weight dump ──────────────────────────────────── */
+    char attn_dump[32768]; int ad_off = 0;
+    if (g_attn_weights && n_tokens >= 2 && nl_used >= 1) {
+        ad_off += snprintf(attn_dump + ad_off, sizeof(attn_dump) - ad_off,
+            "\n═══ Attention Weights (layer 0, 8 Q-heads × %d tokens) ═══\n", n_tokens);
+        /* Show layer 0, first 4 heads, first 4 positions */
+        int show_heads = ATT_N_Q_HEADS < 4 ? ATT_N_Q_HEADS : 4;
+        for (int h = 0; h < show_heads; h++) {
+            int kvh = att_kv_head(h);
+            int is_local = att_is_local(0);
+            ad_off += snprintf(attn_dump + ad_off, sizeof(attn_dump) - ad_off,
+                "  Q-head %d (KV-head %d, %s): [",
+                h, kvh, is_local ? "local" : "global");
+            for (int q = 0; q < n_tokens && q < 8; q++) {
+                float w = g_attn_weights[(size_t)0 * ATT_N_Q_HEADS * 8192 + h * 8192 + q];
+                ad_off += snprintf(attn_dump + ad_off, sizeof(attn_dump) - ad_off,
+                    "%s%.2f", q ? " " : "", w);
+            }
+            ad_off += snprintf(attn_dump + ad_off, sizeof(attn_dump) - ad_off, "]\n");
+        }
+    } else {
+        attn_dump[0] = 0;
+    }
 
     /* Prepend token ID info */
     char token_info[512]; int ti_off = 0;
@@ -313,11 +349,13 @@ static char *generate(const char *prompt){
     }
     ti_off += snprintf(token_info + ti_off, sizeof(token_info) - ti_off, "]\n\n");
 
-    /* Combine token info + result */
+    /* Combine token info + attention dump + result */
+    size_t alen = strlen(attn_dump);
     size_t rlen = strlen(last_result);
-    char *combined = malloc(ti_off + rlen + 1);
+    char *combined = malloc(ti_off + alen + rlen + 1);
     memcpy(combined, token_info, ti_off);
-    memcpy(combined + ti_off, last_result, rlen + 1);
+    if (alen) memcpy(combined + ti_off, attn_dump, alen);
+    memcpy(combined + ti_off + alen, last_result, rlen + 1);
     free(last_result);
     return combined;
 }
