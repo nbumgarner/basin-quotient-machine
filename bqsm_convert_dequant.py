@@ -38,33 +38,40 @@ def dequant_q4(raw, nelems):
     d_br = d.reshape(nb, 1)
     return (nib * d_br * sc_br / 16.0).ravel()[:nelems]
 
-def dequant_q6(raw, nelems):
-    """Q6_K: 210B/block. fp16 d + 16 8-bit scales."""
+def dequant_q6(raw, nelems, chunk_blks=32768):
+    """Q6_K: 210B/block. fp16 d + 16 8-bit scales. Chunked for large tensors."""
     nb = nelems // 256
-    blocks = raw[:nb*210].reshape(nb, 210)
-    d = blocks[:, 0:2].view(np.float16).flatten().astype(np.float32)
+    result = np.empty(nelems, dtype=np.float32)
     
-    ql_raw = blocks[:, 2:130]   # uint8, (nb, 128)
-    qh_raw = blocks[:, 130:194] # uint8, (nb, 64)
-    scales = blocks[:, 194:210].astype(np.float32)
+    for start in range(0, nb, chunk_blks):
+        end = min(start + chunk_blks, nb)
+        nbc = end - start
+        bstart = start * 210
+        bend = end * 210
+        
+        blocks = raw[bstart:bend].reshape(nbc, 210)
+        d = blocks[:, 0:2].view(np.float16).flatten().astype(np.float32)
+        ql_raw = blocks[:, 2:130]
+        qh_raw = blocks[:, 130:194]
+        scales = blocks[:, 194:210].astype(np.float32)
+        
+        lo = np.empty((nbc, 256), dtype=np.float32)
+        lo[:, 0::2] = (ql_raw & 0x0F).astype(np.float32)
+        lo[:, 1::2] = (ql_raw >> 4).astype(np.float32)
+        
+        hi = np.empty((nbc, 256), dtype=np.float32)
+        for s in range(4):
+            hi[:, s::4] = ((qh_raw >> (2*s)) & 0x03).astype(np.float32)
+        
+        vals = lo + hi * 16.0
+        sc_br = np.empty((nbc, 256), dtype=np.float32)
+        for s in range(16):
+            sc_br[:, s*16:(s+1)*16] = scales[:, s:s+1]
+        
+        d_br = d.reshape(nbc, 1)
+        result[start*256:end*256] = (vals * d_br * sc_br / 64.0).ravel()
     
-    # Extract nibbles from ql (integer ops on uint8)
-    lo = np.empty((nb, 256), dtype=np.float32)
-    lo[:, 0::2] = (ql_raw & 0x0F).astype(np.float32)
-    lo[:, 1::2] = (ql_raw >> 4).astype(np.float32)
-    
-    # Extract 2-bit high from qh (integer ops on uint8)
-    hi = np.empty((nb, 256), dtype=np.float32)
-    for s in range(4):
-        hi[:, s::4] = ((qh_raw >> (2*s)) & 0x03).astype(np.float32)
-    
-    vals = lo + hi * 16.0  # 6-bit 0-63
-    sc_br = np.empty((nb, 256), dtype=np.float32)
-    for s in range(16):
-        sc_br[:, s*16:(s+1)*16] = scales[:, s:s+1]
-    
-    d_br = d.reshape(nb, 1)
-    return (vals * d_br * sc_br / 64.0).ravel()[:nelems]
+    return result[:nelems]
 
 def pack_4state(data):
     n = len(data)
