@@ -28,6 +28,7 @@
 #include "bqsm_kernel.h"
 #include "bqsm_tokenizer.h"
 #include "bqsm_debug.h"
+#include "bqsm_attention.h"
 
 /* ─── State ──────────────────────────────────────────────────────────────── */
 static int  g_port=8081, g_running=1, g_n_layers=2;
@@ -35,6 +36,7 @@ static char *g_model_path=NULL;
 static bqsm_model_t g_model;
 static int  g_loaded=0;
 static float g_eq[26][8];  /* per-layer 8-band equalizer gains */
+static att_kv_cache_t *g_kv_caches = NULL;  /* per-layer KV caches */
 
 /* ─── Quantization ──────────────────────────────────────────────────────── */
 #define QS BQSM_Q
@@ -71,13 +73,23 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     if(!g_loaded)return strdup("No model loaded.");
     bqsm_model_t *m=&g_model;
     int dm=m->d_model, ff=m->ffn_dim, nl=m->n_layers;
+    int hd = ATT_HEAD_DIM;
+    int q_dim = ATT_N_Q_HEADS * hd;   /* 2048 */
 
     int8_t *x=malloc(dm); memcpy(x,embedding,dm);
     int8_t *tmp=malloc(ff>dm?ff:dm);
     int32_t *acc=malloc((ff>dm?ff:dm)*sizeof(int32_t));
+    int32_t *o_raw=malloc(dm * sizeof(int32_t));  /* raw O-projection accumulator */
+
+    /* One-time KV cache allocation */
+    if (!g_kv_caches) {
+        g_kv_caches = att_kv_alloc(nl, 8192, ATT_LOCAL_WINDOW);
+        printf("KV caches: %d layers × %d/%d KV heads, global=%d local=%d\n",
+               nl, ATT_N_KV_HEADS, ATT_N_Q_HEADS, 8192, ATT_LOCAL_WINDOW);
+    }
 
     /* Per-layer stats */
-    struct { float gate_m, up_m, down_m, act_m; } stats[26];
+    struct { float gate_m, up_m, down_m, act_m, attn_m; } stats[26];
     int nstats=0;
 
     int64_t total_macs=0;
@@ -87,47 +99,73 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     int nl_used = g_n_layers < m->n_layers ? g_n_layers : m->n_layers;
 
     for(int L=0;L<nl_used;L++){
-        /* Attention norm */
+        /* ── Attention ─────────────────────────────────────────────── */
         snprintf(name,sizeof(name),"blk.%d.attn_norm.weight",L);
         bqsm_tensor_t *an=bqsm_model_find(m,name);
         if(an) rms_norm(x,an->data,dm,tmp);
         else memcpy(tmp,x,dm);
 
-        /* FFN norm (Gemma uses pre-FFN norm) */
+        /* Look up QKVO weights */
+        snprintf(name,sizeof(name),"blk.%d.attn_q.weight",L);
+        bqsm_tensor_t *qw=bqsm_model_find(m,name);
+        snprintf(name,sizeof(name),"blk.%d.attn_k.weight",L);
+        bqsm_tensor_t *kw=bqsm_model_find(m,name);
+        snprintf(name,sizeof(name),"blk.%d.attn_v.weight",L);
+        bqsm_tensor_t *vw=bqsm_model_find(m,name);
+        snprintf(name,sizeof(name),"blk.%d.attn_output.weight",L);
+        bqsm_tensor_t *ow=bqsm_model_find(m,name);
+
+        if (qw && kw && vw && ow && g_kv_caches) {
+            int8_t *attn_out = malloc(dm);
+            bqsm_attention_layer(tmp, dm, qw, kw, vw, ow, L, g_kv_caches, attn_out, o_raw);
+
+            /* Residual: scale raw O-projection by 1/(q_dim*2), same pattern as FFN */
+            for(int i=0;i<dm;i++){
+                int v = (int)x[i] + o_raw[i] / (q_dim * 2);
+                x[i]=(int8_t)(v<0?0:(v>QS?QS:v));
+            }
+            float am=0; for(int i=0;i<dm;i++) am+=x[i];
+            if(nstats<26){ stats[nstats].attn_m = am/dm; }
+
+            total_macs += (int64_t)dm * q_dim        /* Q proj */
+                       + (int64_t)dm * hd * ATT_N_KV_HEADS * 2  /* K + V proj */
+                       + (int64_t)q_dim * dm;       /* O proj */
+            free(attn_out);
+        }
+
+        /* ── FFN ──────────────────────────────────────────────────── */
         snprintf(name,sizeof(name),"blk.%d.ffn_norm.weight",L);
         bqsm_tensor_t *fn=bqsm_model_find(m,name);
         if(fn){
             rms_norm(x,fn->data,dm,tmp);
-            /* For simplicity, skip attention in this demo.
-             * The FFN layers dominate compute (~80%).
-             * Full attention requires softmax (float) + KV cache. */
+
+            /* Gated FFN: gate + up + down.
+             * With BQSM integer states: simplify to down-projection for now.
+             * Full gating (silu) requires float activations. */
+            snprintf(name,sizeof(name),"blk.%d.ffn_down.weight",L);
+            bqsm_tensor_t *down=bqsm_model_find(m,name);
+
+            if(down){
+                bqsm_matmul_vec(tmp,down->data,ff,dm,acc);
+                /* Apply equalizer band gains at the accumulator */
+                for(int i=0;i<dm;i++){
+                    int band = i * 8 / dm;
+                    float gain = g_eq[L][band];
+                    if (gain != 1.0f) acc[i] = (int32_t)((float)acc[i] * gain);
+                }
+                /* Residual: scale by 1/M to keep in 0-3 range */
+                for(int i=0;i<dm;i++){
+                    int v=(int)x[i]+acc[i]/(dm*2);
+                    x[i]=(int8_t)(v<0?0:(v>QS?QS:v));
+                }
+                total_macs += (int64_t)ff*dm;
+            }
         }
 
-        /* FFN: single linear projection (ffn_down).
-         * With untrained Q4_K nibble weights, the gated FFN is unstable.
-         * Single matmul + residual preserves signal diversity. */
-        snprintf(name,sizeof(name),"blk.%d.ffn_down.weight",L);
-        bqsm_tensor_t *down=bqsm_model_find(m,name);
-
-        if(down){
-            bqsm_matmul_vec(tmp,down->data,ff,dm,acc);
-            /* Apply equalizer band gains at the accumulator */
-            for(int i=0;i<dm;i++){
-                int band = i * 8 / dm;  /* which of 8 bands */
-                float gain = g_eq[L][band];
-                if (gain != 1.0f) acc[i] = (int32_t)((float)acc[i] * gain);
-            }
-            /* Residual: scale by 1/M to keep in 0-3 range */
-            for(int i=0;i<dm;i++){
-                int v=(int)x[i]+acc[i]/(dm*2);
-                x[i]=(int8_t)(v<0?0:(v>QS?QS:v));
-            }
-            /* Track per-layer activation mean */
-            if(nstats<26){
-                float am=0; for(int i=0;i<dm;i++) am+=x[i];
-                stats[nstats].act_m=am/dm; nstats++;
-            }
-            total_macs += (int64_t)ff*dm;
+        /* Track per-layer activation mean */
+        if(nstats<26){
+            float am=0; for(int i=0;i<dm;i++) am+=x[i];
+            stats[nstats].act_m=am/dm; nstats++;
         }
     }
 
@@ -135,36 +173,48 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     double elapsed=(t1.tv_sec-t0.tv_sec)+(t1.tv_nsec-t0.tv_nsec)*1e-9;
 
     /* Final RMS norm */
-    snprintf(name,sizeof(name),"output_norm.weight");
     bqsm_tensor_t *on=bqsm_model_find(m,"output_norm.weight");
     if(on)rms_norm(x,on->data,dm,tmp);
     else memcpy(tmp,x,dm);
 
+    /* ── Logit soft-capping (Gemma-2: tanh(logit / 30) * 30) ───── */
+    float fmax=0; int imax=0;
+    for(int i=0;i<dm;i++){
+        float v = (float)tmp[i];
+        float capped = ATT_FINAL_CAP * tanhf(v / ATT_FINAL_CAP);
+        if (capped > fmax) { fmax = capped; imax = i; }
+    }
+
     char *r=malloc(16384);
     int off=0;
     off+=snprintf(r+off,16384-off,
-        "═══ BQSM Multi-Layer Forward Pass ═══\n"
-        "Gemma 2B  %d/%d layers  d=%d  FFN=%d\n"
+        "═══ BQSM Multi-Layer Forward Pass (Attention + FFN) ═══\n"
+        "Gemma 2B  %d/%d layers  d=%d  FFN=%d  head_dim=%d  GQA %dQ/%dKV\n"
         "Total: %.2f GMAC  %.3fs  %.1f GMAC/s\n\n"
-        "Per-layer activation mean (0-3 scale):\n"
-        "Layer │ act_mean\n"
-        "──────┼──────────\n",
-        nl_used,m->n_layers,dm,ff,
+        "Per-layer activation mean (post-attention+FFN, 0-3 scale):\n"
+        "Layer │ attn_mean │ act_mean\n"
+        "──────┼───────────┼──────────\n",
+        nl_used,m->n_layers,dm,ff,hd,ATT_N_Q_HEADS,ATT_N_KV_HEADS,
         total_macs*1e-9,elapsed,total_macs*1e-9/elapsed);
 
     for(int i=0;i<nstats;i++)
-        off+=snprintf(r+off,16384-off," %4d  │ %8.2f\n",
-            i, stats[i].act_m);
+        off+=snprintf(r+off,16384-off," %4d  │ %9.2f │ %8.2f\n",
+            i, stats[i].attn_m, stats[i].act_m);
 
     off+=snprintf(r+off,16384-off,
-        "\nBQSM integer table-lookup matmul — no floating-point.\n"
+        "\nPeak output: dim[%d] = %.1f (capped: %.1f with tanh(×%.0f))\n"
+        "KV cache: %d/%d layers cached (alternating local=%d/global)\n"
         "Tokenizer: %d tokens (character-level, %d vocab).\n"
-        "Real Q4_K nibbles from Gemma 2B (623 MB model).\n"
-        "Full generation needs: SentencePiece tokenizer + trained weights.\n"
-        "Use --layers %d for full 26-layer pass.\n",
-        (int)strlen(prompt), BQSM_VOCAB_SIZE, m->n_layers);
+        "Model: %s\n"
+        "Use --layers %d for full %d-layer pass.\n",
+        imax, fmax, ATT_FINAL_CAP * tanhf(fmax/ATT_FINAL_CAP), ATT_FINAL_CAP,
+        g_kv_caches ? g_kv_caches[0].seq_len : 0, nl_used,
+        ATT_LOCAL_WINDOW,
+        (int)strlen(prompt), BQSM_VOCAB_SIZE,
+        g_model_path ? g_model_path : "none",
+        nl_used, m->n_layers);
 
-    free(tmp);free(acc);free(x);
+    free(tmp);free(acc);free(o_raw);free(x);
     return r;
 }
 
