@@ -26,6 +26,7 @@
 #include <arpa/inet.h>
 #include "bqsm_model.h"
 #include "bqsm_kernel.h"
+#include "bqsm_vocab.h"
 #include "bqsm_tokenizer.h"
 #include "bqsm_debug.h"
 #include "bqsm_attention.h"
@@ -209,16 +210,67 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     return r;
 }
 
-/* ─── Generate ──────────────────────────────────────────────────────────── */
+/* ─── Generate (SentencePiece tokenizer + embedding lookup) ──────────────── */
 static char *generate(const char *prompt){
     if(!g_loaded)return strdup("No model loaded.");
     int dm=g_model.d_model;
 
-    /* Simple hash-based embedding from tokenizer header */
-    int8_t *embed=malloc(dm);
-    bqsm_embed(prompt, dm, embed);
+    /* Tokenize with SentencePiece greedy longest-match */
+    int32_t *token_ids = NULL;
+    int n_tokens = sp_tokenize((const unsigned char*)prompt, (int)strlen(prompt), 64, &token_ids);
+    if (n_tokens <= 0) {
+        free(token_ids);
+        return strdup("Tokenization failed.");
+    }
 
-    char *result=forward_pass(embed,dm,prompt);
+    /* Embedding lookup: for each token, extract ternary embedding from token_embd.
+     * token_embd.weight has shape [d_model, vocab_size] = [2304, 256000].
+     * Packed ternary: each token occupies d_model/4 = 576 bytes.
+     * Use the first token as the input embedding, average if multiple tokens.
+     * Scale to target RMS=32. */
+    bqsm_tensor_t *emb = bqsm_model_find(&g_model, "token_embd.weight");
+    int8_t *embed = calloc((size_t)dm, 1);
+    if (!emb || !embed) { free(token_ids); free(embed); return strdup("No embedding."); }
+
+    const uint8_t *emb_data = (const uint8_t*)emb->data;
+    int stride = dm / 4;  /* bytes per token in packed format */
+
+    /* Accumulate embeddings from all tokens, then average */
+    int32_t *acc_embed = calloc((size_t)dm, sizeof(int32_t));
+    if (!acc_embed) { free(token_ids); free(embed); return strdup("OOM"); }
+
+    for (int t = 0; t < n_tokens; t++) {
+        int tid = token_ids[t];
+        if (tid < 0 || tid >= (int)emb->shape[1]) continue;
+        const uint8_t *row = emb_data + (size_t)tid * (size_t)stride;
+        for (int i = 0; i < dm; i++) {
+            int byte_idx = i / 4;
+            int shift    = (i & 3) * 2;
+            int nb       = (row[byte_idx] >> shift) & 3;
+            /* Ternary LUT: {0:-1, 1:0, 2:+1, 3:0} */
+            static const int8_t tern[4] = {-1, 0, 1, 0};
+            acc_embed[i] += (int32_t)tern[nb];
+        }
+    }
+
+    /* Average and scale to target RMS=32 */
+    float sum_sq = 0.0f;
+    for (int i = 0; i < dm; i++) {
+        float v = (float)acc_embed[i] / (float)n_tokens;
+        sum_sq += v * v;
+    }
+    float rms = sqrtf(sum_sq / (float)dm + 1e-8f);
+    float scale = (rms > 1e-8f) ? 32.0f / rms : 1.0f;
+    for (int i = 0; i < dm; i++) {
+        float v = (float)acc_embed[i] * scale / (float)n_tokens;
+        int32_t iv = (int32_t)lrintf(v);
+        embed[i] = (int8_t)(iv < -128 ? -128 : (iv > 127 ? 127 : iv));
+    }
+
+    free(acc_embed);
+    free(token_ids);
+
+    char *result = forward_pass(embed, dm, prompt);
     free(embed);
     return result;
 }
