@@ -30,10 +30,11 @@
 #include "bqsm_debug.h"
 
 /* ─── State ──────────────────────────────────────────────────────────────── */
-static int  g_port=8081, g_running=1, g_n_layers=2;  /* default: 2 layers for demo */
+static int  g_port=8081, g_running=1, g_n_layers=2;
 static char *g_model_path=NULL;
 static bqsm_model_t g_model;
 static int  g_loaded=0;
+static float g_eq[26][8];  /* per-layer 8-band equalizer gains */
 
 /* ─── Quantization ──────────────────────────────────────────────────────── */
 #define QS BQSM_Q
@@ -110,6 +111,12 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
 
         if(down){
             bqsm_matmul_vec(tmp,down->data,ff,dm,acc);
+            /* Apply equalizer band gains at the accumulator */
+            for(int i=0;i<dm;i++){
+                int band = i * 8 / dm;  /* which of 8 bands */
+                float gain = g_eq[L][band];
+                if (gain != 1.0f) acc[i] = (int32_t)((float)acc[i] * gain);
+            }
             /* Residual: scale by 1/M to keep in 0-3 range */
             for(int i=0;i<dm;i++){
                 int v=(int)x[i]+acc[i]/(dm*2);
@@ -352,15 +359,118 @@ static void *handle_conn(void *arg){
     if(!strcmp(method,"POST")&&!strcmp(url,"/debug/infer")){
         /* Run inference with equalizer applied */
         char *msg = extract_msg(body);
+        /* Parse equalizer from request body if present */
+        const char *ep = strstr(body, "\"equalizer\"");
+        if (ep) {
+            /* Parse JSON equalizer: {"0":[g0..g7], "1":[...], ...} */
+            for (int L = 0; L < 26; L++) {
+                char key[8]; snprintf(key, sizeof(key), "\"%d\"", L);
+                const char *lp = strstr(ep, key);
+                if (lp) {
+                    const char *arr = strchr(lp, '[');
+                    if (arr) {
+                        for (int b = 0; b < 8; b++) {
+                            arr = strchr(arr + (b ? 1 : 0), b == 0 ? '[' : ',');
+                            if (!arr) break;
+                            g_eq[L][b] = (float)atof(arr + 1);
+                        }
+                    }
+                }
+            }
+        }
         char *resp = generate(msg);
         char *ej = jesc(resp);
-        size_t rl = strlen(ej) + 1024;
+        /* Build layer stats */
+        char lstr[4096] = "[";
+        int loff = 1;
+        for (int L = 0; L < g_n_layers && L < g_model.n_layers; L++) {
+            loff += snprintf(lstr + loff, sizeof(lstr) - loff,
+                "%s{\"layer\":%d,\"mean\":0.0}", L > 0 ? "," : "", L);
+        }
+        strcat(lstr, "]");
+        size_t rl = strlen(ej) + 4096;
         char *j = malloc(rl);
-        snprintf(j, rl, "{\"layers\":[],\"eq_applied\":0,\"time_ms\":0,\"gmac\":0,"
-                 "\"output\":%s}", ej);
+        snprintf(j, rl, "{\"layers\":%s,\"eq_applied\":%d,\"gmac\":%.2f,\"output\":%s}",
+                 lstr, (ep ? 1 : 0), 0.0, ej);
         send_resp(fd, 200, "application/json", j);
         free(j); free(ej); free(resp); free(msg);
         close(fd); return NULL;
+    }
+    if(!strcmp(method,"POST")&&!strcmp(url,"/debug/eq")){
+        /* Set equalizer gains from JSON body */
+        for (int L = 0; L < 26; L++) {
+            char key[8]; snprintf(key, sizeof(key), "\"%d\"", L);
+            const char *lp = strstr(body, key);
+            if (lp) {
+                const char *arr = strchr(lp, '[');
+                if (arr) {
+                    for (int b = 0; b < 8; b++) {
+                        arr = strchr(arr + (b ? 1 : 0), b == 0 ? '[' : ',');
+                        if (!arr) break;
+                        g_eq[L][b] = (float)atof(arr + 1);
+                    }
+                }
+            }
+        }
+        const char *ok = "{\"status\":\"ok\"}";
+        send_resp(fd, 200, "application/json", ok);
+        close(fd); return NULL;
+    }
+    if(!strcmp(method,"GET")&&!strncmp(url,"/debug/bands",12)){
+        /* Return sorted FFN dimension bands for a layer */
+        int layer = 0;
+        const char *lp = strstr(url, "layer=");
+        if (lp) layer = atoi(lp + 6);
+        char tname[256];
+        snprintf(tname, sizeof(tname), "blk.%d.ffn_down.weight", layer);
+        bqsm_tensor_t *t = bqsm_model_find(&g_model, tname);
+        char b[65536]; int bl = 0;
+        if (t && t->ndims == 2) {
+            int rows = (int)t->shape[0]; /* 9216 */
+            int cols = (int)t->shape[1]; /* 2304 */
+            /* Compute L2 norm per row (FFN dimension strength) */
+            float *norms = malloc(rows * sizeof(float));
+            for (int r = 0; r < rows; r++) {
+                float sum = 0;
+                for (int c = 0; c < cols; c++)
+                    sum += (float)(t->data[r * cols + c] * t->data[r * cols + c]);
+                norms[r] = sum;
+            }
+            /* Sort dimensions by L2 norm, then band */
+            /* Simple approach: compute band means for the ACTUAL sorted order */
+            /* Create index array and sort by norm using bubble (n=9216, OK for debug) */
+            int *idx = malloc(rows * sizeof(int));
+            for (int r = 0; r < rows; r++) idx[r] = r;
+            /* Bubble sort indices by norm (descending) */
+            for (int i = 0; i < rows-1; i++)
+                for (int j = i+1; j < rows; j++)
+                    if (norms[idx[i]] < norms[idx[j]]) {
+                        int tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+                    }
+            /* Now compute band stats on SORTED order */
+            bl += snprintf(b+bl, sizeof(b)-bl,
+                "{\"layer\":%d,\"total_dims\":%d,\"sorted\":true,\"bands\":[", layer, rows);
+            int band_size = rows / 8;
+            for (int band = 0; band < 8; band++) {
+                int start = band * band_size;
+                int end = (band == 7) ? rows : start + band_size;
+                float band_mean = 0, band_min = norms[idx[start]], band_max = 0;
+                for (int r = start; r < end; r++) {
+                    band_mean += norms[idx[r]];
+                    if (norms[idx[r]] > band_max) band_max = norms[idx[r]];
+                }
+                band_mean /= (end - start);
+                bl += snprintf(b+bl, sizeof(b)-bl,
+                    "%s{\"band\":%d,\"dim_count\":%d,\"norm_range\":[%.0f,%.0f],\"mean\":%.1f}",
+                    band ? "," : "", band, end-start, band_min, band_max, band_mean);
+                band_min = band_max;
+            }
+            bl += snprintf(b+bl, sizeof(b)-bl, "]}");
+            free(idx); free(norms);
+        } else {
+            bl += snprintf(b+bl, sizeof(b)-bl, "{\"error\":\"tensor not found\"}");
+        }
+        send_resp(fd, 200, "application/json", b); close(fd); return NULL;
     }
 
     const char *nf="{\"error\":{\"message\":\"Not found\"}}";
@@ -385,6 +495,7 @@ int main(int argc,char **argv){
         }
     }
     bqsm_tt_init();
+    for(int L=0;L<26;L++)for(int b=0;b<8;b++)g_eq[L][b]=1.0f;
 
     if(g_model_path){
         printf("Loading %s...\n",g_model_path);

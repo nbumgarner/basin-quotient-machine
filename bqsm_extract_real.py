@@ -121,7 +121,7 @@ for ti, t in enumerate(reader.tensors):
         f32dat = np.frombuffer(raw[:ne*4].tobytes(), dtype=np.float32)
         bqsm = np.clip(np.round(f32dat * 1.5 + 2.0), 0, 3).astype(np.uint8)
     elif dtype == 'Q4_K':
-        bqsm = extract_q4(raw, ne) & 3
+        bqsm = extract_q4(raw, ne) >> 2  # preserve nibble magnitude ordering
     elif dtype == 'Q6_K':
         bqsm = extract_q6(raw, ne) >> 4
     else:
