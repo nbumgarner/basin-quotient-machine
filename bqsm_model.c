@@ -44,11 +44,11 @@ int bqsm_model_load(bqsm_model_t *m, const char *path) {
     if (fread(&nt, 4, 1, f) != 1) { fclose(f); return -1; }
     m->n_tensors = (int)nt;
 
-    /* First pass: compute total PACKED data size (no unpacking) */
+    /* First pass: compute total PACKED/F32 data size */
     size_t total_data = 0;
     long   data_offsets[BQSM_MAX_TENSORS];
-    size_t packed_lens[BQSM_MAX_TENSORS];
-    size_t tensor_nelems_raw[BQSM_MAX_TENSORS];
+    size_t data_lens[BQSM_MAX_TENSORS];
+    uint8_t tensor_types[BQSM_MAX_TENSORS];
 
     for (int ti = 0; ti < m->n_tensors; ti++) {
         uint16_t nl; fread(&nl, 2, 1, f);
@@ -56,23 +56,15 @@ int bqsm_model_load(bqsm_model_t *m, const char *path) {
         uint8_t nd; fread(&nd, 1, 1, f);
         fseek(f, nd * 8, SEEK_CUR);  /* skip dims */
 
-        if (is_v3) {
-            uint32_t orig_n, packed_n;
-            fread(&orig_n, 4, 1, f);
-            fread(&packed_n, 4, 1, f);
-            tensor_nelems_raw[ti] = (size_t)orig_n;
-            packed_lens[ti]       = (size_t)packed_n;
-            data_offsets[ti]      = (long)total_data;
-            total_data += (size_t)packed_n;
-            fseek(f, (long)packed_n, SEEK_CUR);
-        } else {
-            uint32_t dl; fread(&dl, 4, 1, f);
-            tensor_nelems_raw[ti] = (size_t)dl;
-            packed_lens[ti]       = (size_t)dl;
-            data_offsets[ti]      = (long)total_data;
-            total_data += (size_t)dl;
-            fseek(f, (long)dl, SEEK_CUR);
-        }
+        uint32_t orig_n; fread(&orig_n, 4, 1, f);
+        uint8_t  ttype = 0; fread(&ttype, 1, 1, f);  /* type byte (v4) */
+        uint32_t data_n; fread(&data_n, 4, 1, f);
+
+        tensor_types[ti] = ttype;
+        data_lens[ti]     = (size_t)data_n;
+        data_offsets[ti]  = (long)total_data;
+        total_data += (size_t)data_n;
+        fseek(f, (long)data_n, SEEK_CUR);
     }
 
     /* Allocate arena — PACKED size (4× smaller than unpacked) */
@@ -104,19 +96,21 @@ int bqsm_model_load(bqsm_model_t *m, const char *path) {
             t->nelems *= (size_t)t->shape[d];  /* logical element count */
         }
 
-        size_t packed_n = packed_lens[ti];
+        size_t data_n = data_lens[ti];
         t->data = (int8_t*)((char*)m->arena + data_offsets[ti]);
+        t->tensor_type = tensor_types[ti];
 
-        if (is_v3) {
-            uint32_t orig_n, pn;
-            fread(&orig_n, 4, 1, f);
-            fread(&pn, 4, 1, f);
-            /* Read packed bytes directly — no unpacking */
-            fread(t->data, 1, packed_n, f);
-        } else {
-            uint32_t dl; fread(&dl, 4, 1, f);
-            fread(t->data, 1, dl, f);
+        uint32_t orig_n; fread(&orig_n, 4, 1, f);
+        uint8_t  ttype;  fread(&ttype, 1, 1, f);
+        uint32_t pn;     fread(&pn, 4, 1, f);
+        
+        if (ttype == 1) {
+            /* F32 tensor: store float_data pointer */
+            t->float_data = (float*)t->data;
+            t->data = NULL;
         }
+        /* Read data bytes */
+        fread(ttype == 1 ? (void*)t->float_data : (void*)t->data, 1, data_n, f);
     }
     fclose(f);
     return 0;

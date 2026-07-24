@@ -19,7 +19,9 @@ typedef struct {
     uint64_t shape[BQSM_MAX_DIMS];
     uint8_t  ndims;
     size_t   nelems;     /* unpacked element count */
-    int8_t  *data;       /* unpacked int8, owned by arena */
+    int8_t  *data;       /* packed ternary data, owned by arena */
+    float   *float_data; /* raw float32 data (norm weights), owned by arena */
+    uint8_t  tensor_type; /* 0=packed ternary, 1=raw float32 */
 } bqsm_tensor_t;
 
 typedef struct {

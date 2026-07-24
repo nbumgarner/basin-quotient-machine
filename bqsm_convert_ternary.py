@@ -142,14 +142,26 @@ for ti, t in enumerate(reader.tensors):
     
     q, alpha = ternarize_twn(w)
     alphas.append((name, alpha))
-    pkb, on = pack_ternary(q)
+    
+    # Store norm tensors as raw float32 (needed for signed RMS norm with Gemma's 1+w formula)
+    is_norm = ('norm' in name) and (dtype == 'F32')
+    
+    if is_norm:
+        pkb = w.astype(np.float32).tobytes()
+        on = ne
+        tensor_type = 1  # F32
+    else:
+        pkb, on = pack_ternary(q)
+        tensor_type = 0  # packed ternary
     
     nb = name.encode()
     f.write(struct.pack('<H', len(nb))); f.write(nb)
     f.write(struct.pack('<B', len(shape)))
     for d in shape: f.write(struct.pack('<Q', d))
-    f.write(struct.pack('<I', on)); f.write(struct.pack('<I', len(pkb)))
-    f.write(pkb.tobytes())
+    f.write(struct.pack('<I', on))
+    f.write(struct.pack('<B', tensor_type))  # 0=packed ternary, 1=raw float32
+    f.write(struct.pack('<I', len(pkb)))
+    f.write(pkb)
     tp += len(pkb)
     
     if ti % 25 == 0:

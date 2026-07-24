@@ -159,21 +159,18 @@ static void bqsm_attention_layer(
     if (k_w) bqsm_matmul_vec(x, k_w->data, d_model, kv_dim, k_acc);
     if (v_w) bqsm_matmul_vec(x, v_w->data, d_model, kv_dim, v_acc);
 
-    /* Quantize Q/K/V to int8 (0-3) with gentle quantization */
+    /* Quantize Q/K/V to signed int8 (clamp from int32 accumulator) */
     for (int i = 0; i < q_dim;  i++) {
-        float v = (float)q_acc[i] / (float)(d_model * 2 + 1) + 1.5f;
-        int iv = (int)(v < 0 ? 0 : (v > BQSM_Q ? BQSM_Q : v));
-        q_out[i] = (int8_t)iv;
+        int32_t v = q_acc[i] / (d_model * 2);
+        q_out[i] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
     }
     for (int i = 0; i < kv_dim; i++) {
-        float v = (float)k_acc[i] / (float)(d_model * 2 + 1) + 1.5f;
-        int iv = (int)(v < 0 ? 0 : (v > BQSM_Q ? BQSM_Q : v));
-        k_out[i] = (int8_t)iv;
+        int32_t v = k_acc[i] / (d_model * 2);
+        k_out[i] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
     }
     for (int i = 0; i < kv_dim; i++) {
-        float v = (float)v_acc[i] / (float)(d_model * 2 + 1) + 1.5f;
-        int iv = (int)(v < 0 ? 0 : (v > BQSM_Q ? BQSM_Q : v));
-        v_out[i] = (int8_t)iv;
+        int32_t v = v_acc[i] / (d_model * 2);
+        v_out[i] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
     }
 
     free(q_acc); free(k_acc); free(v_acc);

@@ -39,33 +39,35 @@ static float g_eq[26][8];  /* per-layer 8-band equalizer gains */
 static att_kv_cache_t *g_kv_caches = NULL;  /* per-layer KV caches */
 
 /* ─── Quantization ──────────────────────────────────────────────────────── */
-#define QS BQSM_Q
-/* Gentle quantization: scale proportionally, don't force full 0-3 range.
-   Expected sum per output = M * mean(TT_output) ≈ M * 2.
-   Scale factor: QS / (M * 2) to map to 0-3 range with midpoint at 1.5. */
-static void quant_gentle(const int32_t *x, int n, int M, int8_t *out) {
-    if(n<=0)return;
-    float sc = (float)QS / (float)(M * 2 + 1);  /* +1 to avoid clipping */
-    for(int i=0;i<n;i++){
-        int v=(int)((float)x[i]*sc+1.5f);  /* center at 1.5 */
-        out[i]=(int8_t)(v<0?0:(v>QS?QS:v));
+/* Signed int8 range [-127, 127] — no unsigned clamp */
+
+/* ─── RMS Norm (signed int8, float rsqrt, Gemma 1+w formula) ──────────── */
+/* x: signed int8 input, w: float32 norm weights, d: dimension
+ * out: signed int8 output, scaled to fill int8 range */
+static void rms_norm_signed(const int8_t *x, const float *w, int d, int8_t *out) {
+    float sum_sq = 0.0f;
+    for (int i = 0; i < d; i++) { float v = (float)x[i]; sum_sq += v * v; }
+    float rms = sqrtf(sum_sq / (float)d + 1e-6f);
+    float inv_rms = 1.0f / rms;
+    
+    /* Gemma RMSNorm: y = x * w / rms. Scale to fill int8 range. */
+    for (int i = 0; i < d; i++) {
+        float y = (float)x[i] * inv_rms * (1.0f + w[i]);
+        int iv = (int)roundf(y * 64.0f);  /* gain to fill int8 */
+        out[i] = (int8_t)(iv < -128 ? -128 : (iv > 127 ? 127 : iv));
     }
 }
 
-/* ─── RMS Norm ──────────────────────────────────────────────────────────── */
-/* RMS(x) = x / sqrt(mean(x^2) + eps) * scale */
-static void rms_norm(const int8_t *x, const int8_t *scale, int d, int8_t *out) {
-    /* Convert to float for stable norm computation */
-    float sum_sq=0.0f;
-    for(int i=0;i<d;i++){float v=(float)x[i];sum_sq+=v*v;}
-    float rms=sqrtf(sum_sq/(float)d+1e-6f);
-    float inv_rms=1.0f/rms;
-    for(int i=0;i<d;i++){
-        float v=(float)x[i]*inv_rms*(float)scale[i]*0.25f;
-        /* Scale back to [0,QS] */
-        int iv=(int)(v*0.5f+1.5f);
-        out[i]=(int8_t)(iv<0?0:(iv>QS?QS:iv));
-    }
+/* ─── Signed quantization helper ────────────────────────────────────────── */
+/* Clamp int32 accumulator to signed int8 range */
+static inline int8_t clamp_i8(int32_t v) {
+    return (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+}
+
+/* Get float32 norm weight tensor — fall back to NULL if not F32 */
+static const float *get_norm_f32(bqsm_model_t *m, const char *name) {
+    bqsm_tensor_t *t = bqsm_model_find(m, name);
+    return (t && t->tensor_type == 1) ? t->float_data : NULL;
 }
 
 /* ─── Full Forward Pass ─────────────────────────────────────────────────── */
@@ -79,30 +81,27 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     int8_t *x=malloc(dm); memcpy(x,embedding,dm);
     int8_t *tmp=malloc(ff>dm?ff:dm);
     int32_t *acc=malloc((ff>dm?ff:dm)*sizeof(int32_t));
-    int32_t *o_raw=malloc(dm * sizeof(int32_t));  /* raw O-projection accumulator */
+    int32_t *o_raw=malloc(dm * sizeof(int32_t));
     int nl_used = g_n_layers < m->n_layers ? g_n_layers : m->n_layers;
 
-    /* One-time KV cache allocation — sized for actual layers used */
+    /* One-time KV cache allocation */
     if (!g_kv_caches) {
         g_kv_caches = att_kv_alloc(nl_used, 8192, ATT_LOCAL_WINDOW);
     }
 
-    /* Per-layer stats */
-    struct { float gate_m, up_m, down_m, act_m, attn_m, min, max; float l2; } stats[26];
+    struct { float attn_m, act_m, min, max, l2; } stats[26];
     int nstats=0;
-
     int64_t total_macs=0;
     struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
     char name[256];
 
     for(int L=0;L<nl_used;L++){
-        /* ── Attention ─────────────────────────────────────────────── */
+        /* ── Attention (signed) ────────────────────────────────────── */
         snprintf(name,sizeof(name),"blk.%d.attn_norm.weight",L);
-        bqsm_tensor_t *an=bqsm_model_find(m,name);
-        if(an) rms_norm(x,an->data,dm,tmp);
+        const float *an_w = get_norm_f32(m, name);
+        if(an_w) rms_norm_signed(x, an_w, dm, tmp);
         else memcpy(tmp,x,dm);
 
-        /* Look up QKVO weights */
         snprintf(name,sizeof(name),"blk.%d.attn_q.weight",L);
         bqsm_tensor_t *qw=bqsm_model_find(m,name);
         snprintf(name,sizeof(name),"blk.%d.attn_k.weight",L);
@@ -116,50 +115,39 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
             int8_t *attn_out = malloc(dm);
             bqsm_attention_layer(tmp, dm, qw, kw, vw, ow, L, g_kv_caches, attn_out, o_raw);
 
-            /* Residual: scale raw O-projection by 1/(q_dim*2), same pattern as FFN */
+            /* Residual: int32 add, then requantize to signed int8 */
             for(int i=0;i<dm;i++){
-                int v = (int)x[i] + o_raw[i] / (q_dim * 2);
-                x[i]=(int8_t)(v<0?0:(v>QS?QS:v));
+                int32_t v = (int32_t)x[i] + o_raw[i] / (q_dim * 4);
+                x[i] = clamp_i8(v);
             }
             float am=0; for(int i=0;i<dm;i++) am+=x[i];
             if(nstats<26){ stats[nstats].attn_m = am/dm; }
 
-            total_macs += (int64_t)dm * q_dim        /* Q proj */
-                       + (int64_t)dm * hd * ATT_N_KV_HEADS * 2  /* K + V proj */
-                       + (int64_t)q_dim * dm;       /* O proj */
+            total_macs += (int64_t)dm * q_dim
+                       + (int64_t)dm * hd * ATT_N_KV_HEADS * 2
+                       + (int64_t)q_dim * dm;
             free(attn_out);
         }
 
-        /* ── FFN ──────────────────────────────────────────────────── */
+        /* ── FFN (signed) ──────────────────────────────────────────── */
         snprintf(name,sizeof(name),"blk.%d.ffn_norm.weight",L);
-        bqsm_tensor_t *fn=bqsm_model_find(m,name);
-        if(fn){
-            rms_norm(x,fn->data,dm,tmp);
-
-            /* Gated FFN: gate + up + down.
-             * With BQSM integer states: simplify to down-projection for now.
-             * Full gating (silu) requires float activations. */
+        const float *fn_w = get_norm_f32(m, name);
+        if(fn_w){
+            rms_norm_signed(x, fn_w, dm, tmp);
             snprintf(name,sizeof(name),"blk.%d.ffn_down.weight",L);
             bqsm_tensor_t *down=bqsm_model_find(m,name);
-
             if(down){
-                bqsm_matmul_vec(tmp,down->data,ff,dm,acc);
-                /* Apply equalizer band gains at the accumulator */
+                bqsm_matmul_vec(tmp, down->data, ff, dm, acc);
+                /* Residual: int32 add, requantize */
                 for(int i=0;i<dm;i++){
-                    int band = i * 8 / dm;
-                    float gain = g_eq[L][band];
-                    if (gain != 1.0f) acc[i] = (int32_t)((float)acc[i] * gain);
-                }
-                /* Residual: scale by 1/M to keep in 0-3 range */
-                for(int i=0;i<dm;i++){
-                    int v=(int)x[i]+acc[i]/(dm*2);
-                    x[i]=(int8_t)(v<0?0:(v>QS?QS:v));
+                    int32_t v = (int32_t)x[i] + acc[i] / (dm * 4);
+                    x[i] = clamp_i8(v);
                 }
                 total_macs += (int64_t)ff*dm;
             }
         }
 
-        /* Track per-layer activation mean + range + L2 */
+        /* Per-layer stats (signed) */
         if(nstats<26){
             float am=0, mn=(float)x[0], mx=(float)x[0]; double l2=0;
             for(int i=0;i<dm;i++){
@@ -177,11 +165,11 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     double elapsed=(t1.tv_sec-t0.tv_sec)+(t1.tv_nsec-t0.tv_nsec)*1e-9;
 
     /* Final RMS norm */
-    bqsm_tensor_t *on=bqsm_model_find(m,"output_norm.weight");
-    if(on)rms_norm(x,on->data,dm,tmp);
+    const float *on_w = get_norm_f32(m, "output_norm.weight");
+    if(on_w) rms_norm_signed(x, on_w, dm, tmp);
     else memcpy(tmp,x,dm);
 
-    /* ── Logit soft-capping (Gemma-2: tanh(logit / 30) * 30) ───── */
+    /* Logit soft-capping */
     float fmax=0; int imax=0;
     for(int i=0;i<dm;i++){
         float v = (float)tmp[i];
@@ -192,32 +180,24 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     char *r=malloc(16384);
     int off=0;
     off+=snprintf(r+off,16384-off,
-        "═══ BQSM Multi-Layer Forward Pass (Attention + FFN) ═══\n"
-        "Gemma 2B  %d/%d layers  d=%d  FFN=%d  head_dim=%d  GQA %dQ/%dKV\n"
+        "═══ BQSM Signed Forward Pass ═══\n"
+        "Gemma 2B  %d/%dL  d=%d  FFN=%d  hd=%d  GQA %dQ/%dKV  int8 signed\n"
         "Total: %.2f GMAC  %.3fs  %.1f GMAC/s\n\n"
-        "Per-layer diagnostics (post-attention+FFN, 0-3 scale):\n"
-        "Layer │ attn_m │ act_m │ min │ max │ L2\n"
-        "──────┼────────┼───────┼─────┼─────┼─────\n",
+        "Layer │ attn_m │ act_m │  min │  max │  L2\n"
+        "──────┼────────┼───────┼──────┼──────┼─────\n",
         nl_used,m->n_layers,dm,ff,hd,ATT_N_Q_HEADS,ATT_N_KV_HEADS,
         total_macs*1e-9,elapsed,total_macs*1e-9/elapsed);
 
     for(int i=0;i<nstats;i++)
-        off+=snprintf(r+off,16384-off," %4d  │ %6.2f │ %5.2f │ %3.0f │ %3.0f │ %4.1f\n",
+        off+=snprintf(r+off,16384-off," %4d  │ %6.1f │ %5.1f │ %4.0f │ %4.0f │ %4.0f\n",
             i, stats[i].attn_m, stats[i].act_m,
             stats[i].min, stats[i].max, stats[i].l2);
 
     off+=snprintf(r+off,16384-off,
-        "\nPeak output: dim[%d] = %.1f (capped: %.1f with tanh(×%.0f))\n"
-        "KV cache: %d/%d layers cached (alternating local=%d/global)\n"
-        "Tokenizer: %d tokens (character-level, %d vocab).\n"
-        "Model: %s\n"
-        "Use --layers %d for full %d-layer pass.\n",
-        imax, fmax, ATT_FINAL_CAP * tanhf(fmax/ATT_FINAL_CAP), ATT_FINAL_CAP,
+        "\nPeak: dim[%d]=%.0f  KV: %d/%dL  tok: %d\n",
+        imax, fmax,
         g_kv_caches ? g_kv_caches[0].seq_len : 0, nl_used,
-        ATT_LOCAL_WINDOW,
-        (int)strlen(prompt), BQSM_VOCAB_SIZE,
-        g_model_path ? g_model_path : "none",
-        nl_used, m->n_layers);
+        (int)strlen(prompt));
 
     free(tmp);free(acc);free(o_raw);free(x);
     return r;
