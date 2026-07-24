@@ -1,10 +1,10 @@
 /* ===========================================================================
- * bqsm_kernel.h — BQSM Matmul Kernels v5 (packed, phase-serial, low reg pressure)
+ * bqsm_kernel.h — BQSM Matmul Kernels v6 (signed path, cvtepi8, phase-serial)
  *
- *   Packed 2-bit weights, in-register unpack per nibble phase.
- *   One phase at a time (4 acc regs reused), no scatter stores.
- *   4 passes over k: each pass reads packed weights (same total traffic
- *   as one unpacked pass since packed is 4× smaller).
+ *   Ternary weights (-1/0/1) packed 2-bit. Signed path:
+ *   pshufb LUT → sign_epi8 → cvtepi8_epi16 → accumulate in int16.
+ *   5 ops per 16 MACs (vs 11 for unsigned TT path).
+ *   int16 accumulators: max 9216 → no overflow. Widen to int32 at output.
  * ======================================================================== */
 
 #ifndef BQSM_KERNEL_H
@@ -16,12 +16,13 @@
 
 #ifdef __SSSE3__
 #include <tmmintrin.h>
+#include <smmintrin.h>  /* SSE4.1 for _mm_cvtepi8_epi16 */
 #endif
 
 #define BQSM_Q 3
 
+/* ─── TT table (unsigned path, kept for backward compat) ───────────────── */
 static int8_t bqsm_tt[16] __attribute__((aligned(16)));
-
 static inline void bqsm_tt_init(void) {
     for (int a = 0; a <= BQSM_Q; a++)
         for (int b = 0; b <= BQSM_Q; b++) {
@@ -30,6 +31,12 @@ static inline void bqsm_tt_init(void) {
         }
 }
 
+/* ─── Ternary LUT: nibble (0,1,2) → int8 (-1,0,1) ─────────────────────── */
+static const int8_t bqsm_ternary_lut[16] __attribute__((aligned(16))) = {
+    -1, 0, 1, 0,  -1, 0, 1, 0,  -1, 0, 1, 0,  -1, 0, 1, 0
+};
+
+/* ─── Scalar fallback ───────────────────────────────────────────────────── */
 static inline void bqsm_matmul_vec_scalar(const int8_t *x, const int8_t *W,
                                           int M, int N, int32_t *C) {
     memset(C, 0, N * sizeof(int32_t));
@@ -41,46 +48,54 @@ static inline void bqsm_matmul_vec_scalar(const int8_t *x, const int8_t *W,
     }
 }
 
-#ifdef __SSSE3__
+/* ─── SIMD signed path (SSE4.1: cvtepi8, phase-serial) ────────────────── */
+#if defined(__SSSE3__) && defined(__SSE4_1__)
 
-/* Process 64 columns (one 16-byte packed block) for all k.
- * One nibble phase per call (phase = 0..3).
- * Uses 4 XMM accumulator registers — no spilling.
- * Output: C[j0 + phase + 4*i] for i=0..15 (stride-4, stored once at end). */
-static inline void bqsm_sse_block(const int8_t *x, const uint8_t *W_packed,
-                                  int M, int N, int j0, int phase,
-                                  int32_t *C) {
-    __m128i tt   = _mm_load_si128((__m128i*)bqsm_tt);
-    __m128i zero = _mm_setzero_si128();
-    __m128i m03  = _mm_set1_epi8(0x03);
-    int shift    = phase * 2;
+/* Process one nibble phase for 64 output columns.
+ * Phase p: columns j = j0 + p + 4*i for i=0..15.
+ * Uses int16 accumulators (2 regs = 16 int16 values per phase).
+ * Widen to int32 at output, store at stride 4. */
+static inline void bqsm_sse_phase_signed(const int8_t *x,
+                                         const uint8_t *W_packed,
+                                         int M, int N, int j0, int phase,
+                                         int32_t *C) {
+    __m128i lut   = _mm_load_si128((__m128i*)bqsm_ternary_lut);
+    __m128i zero  = _mm_setzero_si128();
+    __m128i m03   = _mm_set1_epi8(0x03);
+    int shift     = phase * 2;
 
-    __m128i acc0 = zero, acc1 = zero, acc2 = zero, acc3 = zero;
+    /* int16 accumulators: 16 values → 2 XMM regs */
+    __m128i acc_lo = zero, acc_hi = zero;
 
     for (int k = 0; k < M; k++) {
-        __m128i a4 = _mm_set1_epi8((char)((int)x[k] << 2));
-        __m128i p  = _mm_loadu_si128((__m128i*)&W_packed[k * (N/4) + j0/4]);
-        __m128i w  = _mm_and_si128(_mm_srli_epi32(p, shift), m03);
-        __m128i pr = _mm_shuffle_epi8(tt, _mm_or_si128(a4, w));
+        __m128i act = _mm_set1_epi8(x[k]);
+        __m128i p   = _mm_loadu_si128((__m128i*)&W_packed[k * (N/4) + j0/4]);
 
-        __m128i lo16 = _mm_unpacklo_epi8(pr, zero);
-        __m128i hi16 = _mm_unpackhi_epi8(pr, zero);
+        /* Extract nibble phase, map to ternary via pshufb LUT */
+        __m128i nb  = _mm_and_si128(_mm_srli_epi32(p, shift), m03);
+        __m128i w   = _mm_shuffle_epi8(lut, nb);
 
-        acc0 = _mm_add_epi32(acc0, _mm_unpacklo_epi16(lo16, zero));
-        acc1 = _mm_add_epi32(acc1, _mm_unpackhi_epi16(lo16, zero));
-        acc2 = _mm_add_epi32(acc2, _mm_unpacklo_epi16(hi16, zero));
-        acc3 = _mm_add_epi32(acc3, _mm_unpackhi_epi16(hi16, zero));
+        /* Element-wise signed multiply: sign_epi8(act, w) → int8 {-1,0,1} */
+        __m128i pr  = _mm_sign_epi8(act, w);
+
+        /* Widen int8 → int16 (SSE4.1). 5 ops total per iteration. */
+        __m128i lo  = _mm_cvtepi8_epi16(pr);
+        __m128i hi  = _mm_cvtepi8_epi16(_mm_srli_si128(pr, 8));
+
+        acc_lo = _mm_add_epi16(acc_lo, lo);
+        acc_hi = _mm_add_epi16(acc_hi, hi);
     }
 
-    /* Store to stride-4 positions: C[j0 + phase + 0], C[j0 + phase + 4], ... */
-    int32_t *out = C + j0 + phase;
+    /* Widen int16 → int32 and store at stride-4 positions */
     int32_t tmp[16] __attribute__((aligned(16)));
-    _mm_store_si128((__m128i*)&tmp[0],  acc0);
-    _mm_store_si128((__m128i*)&tmp[4],  acc1);
-    _mm_store_si128((__m128i*)&tmp[8],  acc2);
-    _mm_store_si128((__m128i*)&tmp[12], acc3);
+    _mm_store_si128((__m128i*)&tmp[0],  _mm_cvtepi16_epi32(acc_lo));
+    _mm_store_si128((__m128i*)&tmp[4],  _mm_cvtepi16_epi32(_mm_srli_si128(acc_lo, 8)));
+    _mm_store_si128((__m128i*)&tmp[8],  _mm_cvtepi16_epi32(acc_hi));
+    _mm_store_si128((__m128i*)&tmp[12], _mm_cvtepi16_epi32(_mm_srli_si128(acc_hi, 8)));
+
+    int32_t *out = C + j0 + phase;
     for (int i = 0; i < 16; i++)
-        out[i * 4] += tmp[i];  /* stride-4 write, once per block */
+        out[i * 4] += tmp[i];
 }
 
 static inline void bqsm_matmul_vec_sse(const int8_t *x, const uint8_t *W_packed,
@@ -91,14 +106,16 @@ static inline void bqsm_matmul_vec_sse(const int8_t *x, const uint8_t *W_packed,
         int np = (j0 + 64 <= N) ? 64 : N - j0;
         if (np == 64) {
             for (int phase = 0; phase < 4; phase++)
-                bqsm_sse_block(x, W_packed, M, N, j0, phase, C);
+                bqsm_sse_phase_signed(x, W_packed, M, N, j0, phase, C);
         } else {
+            /* Scalar tail */
             for (int k = 0; k < M; k++) {
-                int a = (int)x[k] << 2;
+                int8_t a = x[k];
                 for (int j = j0; j < N; j++) {
                     int bi = k * (N/4) + j/4;
-                    int w = (W_packed[bi] >> (2 * (j % 4))) & 3;
-                    C[j] += bqsm_tt[a | w];
+                    int nb = (W_packed[bi] >> (2 * (j % 4))) & 3;
+                    int8_t w = bqsm_ternary_lut[nb];
+                    C[j] += (int)a * (int)w;
                 }
             }
         }
@@ -106,9 +123,10 @@ static inline void bqsm_matmul_vec_sse(const int8_t *x, const uint8_t *W_packed,
 }
 #endif
 
+/* ─── Dispatch ──────────────────────────────────────────────────────────── */
 static inline void bqsm_matmul_vec(const int8_t *x, const int8_t *W,
                                    int M, int N, int32_t *C) {
-#ifdef __SSSE3__
+#if defined(__SSSE3__) && defined(__SSE4_1__)
     bqsm_matmul_vec_sse(x, (const uint8_t*)W, M, N, C);
 #else
     bqsm_matmul_vec_scalar(x, W, M, N, C);
