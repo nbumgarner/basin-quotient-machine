@@ -258,7 +258,7 @@ static void *handle_conn(void *arg){
         send_resp(fd,200,"application/json",b); close(fd); return NULL;
     }
 
-    if(!strcmp(method,"GET")&&!strcmp(url,"/v1/tokenize")){
+    if(!strcmp(method,"GET")&&!strncmp(url,"/v1/tokenize",12)){
         const char *text = strstr(url, "text=");
         if (!text) text = "hello";
         else { text = strchr(text, '='); if (text) text++; else text = "hello"; }
