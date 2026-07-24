@@ -159,18 +159,18 @@ static void bqsm_attention_layer(
     if (k_w) bqsm_matmul_vec(x, k_w->data, d_model, kv_dim, k_acc);
     if (v_w) bqsm_matmul_vec(x, v_w->data, d_model, kv_dim, v_acc);
 
-    /* Quantize Q/K/V to signed int8 (clamp from int32 accumulator) */
-    for (int i = 0; i < q_dim;  i++) {
-        int32_t v = q_acc[i] / (d_model * 2);
-        q_out[i] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
-    }
-    for (int i = 0; i < kv_dim; i++) {
-        int32_t v = k_acc[i] / (d_model * 2);
-        k_out[i] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
-    }
-    for (int i = 0; i < kv_dim; i++) {
-        int32_t v = v_acc[i] / (d_model * 2);
-        v_out[i] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+    /* Quantize Q/K/V to signed int8 with target RMS matching input scale */
+    {
+        double sum_q=0, sum_k=0, sum_v=0;
+        for (int i = 0; i < q_dim;  i++) sum_q += (double)q_acc[i]*(double)q_acc[i];
+        for (int i = 0; i < kv_dim; i++) { sum_k += (double)k_acc[i]*(double)k_acc[i]; sum_v += (double)v_acc[i]*(double)v_acc[i]; }
+        float rms_q = (float)sqrt(sum_q/(double)q_dim + 1e-8);
+        float rms_kv = (float)sqrt(sum_k/(double)kv_dim + 1e-8);
+        float sc_q = (rms_q > 1e-8f) ? 32.0f / rms_q : 1.0f;
+        float sc_kv = (rms_kv > 1e-8f) ? 32.0f / rms_kv : 1.0f;
+        for (int i = 0; i < q_dim;  i++) { int32_t v=(int32_t)lrintf((float)q_acc[i]*sc_q);   q_out[i]=(int8_t)(v<-128?-128:(v>127?127:v)); }
+        for (int i = 0; i < kv_dim; i++) { int32_t v=(int32_t)lrintf((float)k_acc[i]*sc_kv);  k_out[i]=(int8_t)(v<-128?-128:(v>127?127:v)); }
+        for (int i = 0; i < kv_dim; i++) { int32_t v=(int32_t)lrintf((float)v_acc[i]*sc_kv);  v_out[i]=(int8_t)(v<-128?-128:(v>127?127:v)); }
     }
 
     free(q_acc); free(k_acc); free(v_acc);

@@ -38,33 +38,43 @@ static int  g_loaded=0;
 static float g_eq[26][8];  /* per-layer 8-band equalizer gains */
 static att_kv_cache_t *g_kv_caches = NULL;  /* per-layer KV caches */
 
-/* ─── Quantization ──────────────────────────────────────────────────────── */
-/* Signed int8 range [-127, 127] — no unsigned clamp */
+/* ─── Quantization helpers ───────────────────────────────────────────────── */
+static inline float rms_of_i8(const int8_t *x, int d) {
+    float sum = 0.0f;
+    for (int i = 0; i < d; i++) { float v = (float)x[i]; sum += v * v; }
+    return sqrtf(sum / (float)d + 1e-8f);
+}
 
-/* ─── RMS Norm (signed int8, float rsqrt, Gemma 1+w formula) ──────────── */
-/* x: signed int8 input, w: float32 norm weights, d: dimension
- * out: signed int8 output, scaled to fill int8 range */
+static inline float rms_of_i32(const int32_t *x, int d) {
+    double sum = 0.0;
+    for (int i = 0; i < d; i++) sum += (double)x[i] * (double)x[i];
+    return (float)sqrt(sum / (double)d + 1e-8);
+}
+
+/* Requantize int32 array to int8 with target RMS, clamp to [-128,127] */
+static void requantize_i8(const int32_t *src, int d, float target_rms, int8_t *dst) {
+    float rms = rms_of_i32(src, d);
+    float scale = (rms > 1e-8f) ? target_rms / rms : 1.0f;
+    for (int i = 0; i < d; i++) {
+        int32_t v = (int32_t)lrintf((float)src[i] * scale);
+        dst[i] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+    }
+}
+
+/* ─── RMS Norm (target RMS = 32, Gemma 1+w formula) ───────────────────── */
 static void rms_norm_signed(const int8_t *x, const float *w, int d, int8_t *out) {
     float sum_sq = 0.0f;
     for (int i = 0; i < d; i++) { float v = (float)x[i]; sum_sq += v * v; }
-    float rms = sqrtf(sum_sq / (float)d + 1e-6f);
-    float inv_rms = 1.0f / rms;
-    
-    /* Gemma RMSNorm: y = x * w / rms. Scale to fill int8 range. */
+    float rms = sqrtf(sum_sq / (float)d + 1e-8f);
+    float inv = 32.0f / rms;  /* target RMS = 32 */
     for (int i = 0; i < d; i++) {
-        float y = (float)x[i] * inv_rms * (1.0f + w[i]);
-        int iv = (int)roundf(y * 64.0f);  /* gain to fill int8 */
+        float y = (float)x[i] * inv * (1.0f + w[i]);
+        int32_t iv = (int32_t)lrintf(y);
         out[i] = (int8_t)(iv < -128 ? -128 : (iv > 127 ? 127 : iv));
     }
 }
 
-/* ─── Signed quantization helper ────────────────────────────────────────── */
-/* Clamp int32 accumulator to signed int8 range */
-static inline int8_t clamp_i8(int32_t v) {
-    return (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
-}
-
-/* Get float32 norm weight tensor — fall back to NULL if not F32 */
+/* Get float32 norm weight tensor */
 static const float *get_norm_f32(bqsm_model_t *m, const char *name) {
     bqsm_tensor_t *t = bqsm_model_find(m, name);
     return (t && t->tensor_type == 1) ? t->float_data : NULL;
@@ -115,11 +125,9 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
             int8_t *attn_out = malloc(dm);
             bqsm_attention_layer(tmp, dm, qw, kw, vw, ow, L, g_kv_caches, attn_out, o_raw);
 
-            /* Residual: int32 add, then requantize to signed int8 */
-            for(int i=0;i<dm;i++){
-                int32_t v = (int32_t)x[i] + o_raw[i] / (q_dim * 4);
-                x[i] = clamp_i8(v);
-            }
+            /* Residual: int32 add x + o_raw at matched scale, requantize */
+            for(int i=0;i<dm;i++) o_raw[i] += (int32_t)x[i];
+            requantize_i8(o_raw, dm, 32.0f, x);
             float am=0; for(int i=0;i<dm;i++) am+=x[i];
             if(nstats<26){ stats[nstats].attn_m = am/dm; }
 
@@ -139,10 +147,8 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
             if(down){
                 bqsm_matmul_vec(tmp, down->data, ff, dm, acc);
                 /* Residual: int32 add, requantize */
-                for(int i=0;i<dm;i++){
-                    int32_t v = (int32_t)x[i] + acc[i] / (dm * 4);
-                    x[i] = clamp_i8(v);
-                }
+                for(int i=0;i<dm;i++) acc[i] += (int32_t)x[i];
+                requantize_i8(acc, dm, 32.0f, x);
                 total_macs += (int64_t)ff*dm;
             }
         }
