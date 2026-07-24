@@ -84,7 +84,8 @@ static const float *get_norm_f32(bqsm_model_t *m, const char *name) {
 }
 
 /* ─── Full Forward Pass ─────────────────────────────────────────────────── */
-static char *forward_pass(const int8_t *embedding, int d_model, const char *prompt) {
+static char *forward_pass(const int8_t *embedding, int d_model, const char *prompt,
+                          int8_t *final_hidden) {
     if(!g_loaded)return strdup("No model loaded.");
     bqsm_model_t *m=&g_model;
     int dm=m->d_model, ff=m->ffn_dim, nl=m->n_layers;
@@ -209,6 +210,7 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
         g_kv_caches ? g_kv_caches[0].seq_len : 0, nl_used,
         (int)strlen(prompt));
 
+    if (final_hidden) memcpy(final_hidden, x, (size_t)dm);
     free(tmp);free(acc);free(o_raw);free(x);
     return r;
 }
@@ -266,6 +268,7 @@ static char *generate(const char *prompt){
     g_attn_seq = 0;
 
     char *last_result = NULL;
+    int8_t *final_hidden = NULL;
     for (int t = 0; t < n_tokens && t < 16; t++) {
         int tid = token_ids[t];
         if (tid < 0 || tid >= (int)emb->shape[1]) continue;
@@ -297,13 +300,53 @@ static char *generate(const char *prompt){
         }
         free(acc_embed);
 
-        /* Forward pass — accumulates KV cache, returns stats */
-        char *result = forward_pass(embed, dm, prompt);
-        g_attn_seq++;
+        /* Forward pass — last token captures hidden state for lm_head */
+        int8_t *hidden_buf = (t == n_tokens - 1) ? malloc((size_t)dm) : NULL;
+        char *result = forward_pass(embed, dm, prompt, hidden_buf);
+        if (t == n_tokens - 1) final_hidden = hidden_buf;
         free(embed);
         if (last_result) free(last_result);
         last_result = result;
     }
+
+    /* ── lm_head: tied embedding projection + argmax ──────────── */
+    char prediction[256] = "";
+    if (final_hidden && emb) {
+        int32_t best_logit = INT32_MIN;
+        int best_token = 0;
+        int vocab_n = (int)emb->shape[1];  /* 256000 */
+        /* Sample: check every 128th token across full vocab for speed */
+        for (int tid = 0; tid < vocab_n; tid += 128) {
+            const uint8_t *row = emb_data + (size_t)tid * (size_t)stride;
+            int32_t dot = 0;
+            /* Compute dot product over int8 hidden × ternary embedding */
+            for (int i = 0; i < dm; i++) {
+                int byte_idx = i / 4;
+                int shift    = (i & 3) * 2;
+                int nb       = (row[byte_idx] >> shift) & 3;
+                static const int8_t tern[4] = {-1, 0, 1, 0};
+                dot += (int32_t)final_hidden[i] * (int32_t)tern[nb];
+            }
+            if (dot > best_logit) {
+                best_logit = dot;
+                best_token = tid;
+            }
+        }
+        /* Look up token string */
+        for (int i = 0; i < SP_VOCAB_SIZE; i++) {
+            if ((int)sp_vocab_index[i].id == best_token) {
+                int mlen = sp_vocab_index[i].len;
+                int off  = sp_vocab_index[i].off;
+                int nc = mlen < 60 ? mlen : 60;
+                memcpy(prediction, sp_vocab_data + off, (size_t)nc);
+                prediction[nc] = 0;
+                break;
+            }
+        }
+        snprintf(prediction + strlen(prediction), sizeof(prediction) - strlen(prediction),
+                 " (id=%d, logit=%d)", best_token, best_logit);
+    }
+    free(final_hidden);
 
     free(token_ids);
     if (!last_result) return strdup("No tokens processed.");
@@ -356,6 +399,13 @@ static char *generate(const char *prompt){
     memcpy(combined, token_info, ti_off);
     if (alen) memcpy(combined + ti_off, attn_dump, alen);
     memcpy(combined + ti_off + alen, last_result, rlen + 1);
+    /* Append prediction */
+    size_t plen = strlen(prediction);
+    if (plen > 0) {
+        combined = realloc(combined, ti_off + alen + rlen + plen + 16);
+        memcpy(combined + ti_off + alen + rlen, "\nPrediction: ", 12);
+        memcpy(combined + ti_off + alen + rlen + 12, prediction, plen + 1);
+    }
     free(last_result);
     return combined;
 }

@@ -213,10 +213,20 @@ static void bqsm_attention_layer(
             int32_t dot = 0;
             for (int d = 0; d < hd; d++)
                 dot += (int32_t)q_head[d] * (int32_t)k_pos[d];
-            /* Scale: 1/(RMS² * sqrt(hd)). RMS=32 is the target quantization scale.
-             * Q_int · K_int has magnitude 32² * 256 = 262K.
-             * Dividing by 32² * 16 = 16384 brings logits to float-space (~0-16). */
-            float logit_scale = 1.0f / (32.0f * 32.0f * 16.0f);
+            /* Compute actual RMS of Q head and K cache for this head.
+             * Logit = dot / (rms_q · rms_k · √hd). Derived, not hardcoded. */
+            float rms_qh = 0.0f, rms_kh = 0.0f;
+            for (int d = 0; d < hd; d++) {
+                rms_qh += (float)q_head[d] * (float)q_head[d];
+            }
+            rms_qh = sqrtf(rms_qh / (float)hd + 1e-8f);
+            /* Use first cached K for RMS estimate (all K entries have same RMS) */
+            const int8_t *k0 = kv->k + (0 * n_kvh + kvh) * hd;
+            for (int d = 0; d < hd; d++) {
+                rms_kh += (float)k0[d] * (float)k0[d];
+            }
+            rms_kh = sqrtf(rms_kh / (float)hd + 1e-8f);
+            float logit_scale = 1.0f / (rms_qh * rms_kh * sqrtf((float)hd));
             float raw = (float)dot * logit_scale;
             /* Logit soft-capping: capped = cap * tanh(raw / cap) */
             float capped = ATT_LOGIT_CAP * tanhf(raw / ATT_LOGIT_CAP);
