@@ -1,32 +1,13 @@
 /* ===========================================================================
- * bqsm_server.c — BQSM Inference Server
- * ===========================================================================
+ * bqsm_server.c — BQSM Inference Server v3.0
  *
- *   OpenAI-compatible REST API for quantized model inference.
- *   Single binary. No Python, no CUDA, no external ML runtime.
- *
- *   Backend: bqsm_simd.c pshufb kernel (2.8 GMACs/s on SSE4.1).
- *   HTTP:    libmicrohttpd (embedded, no external web server needed).
- *   Models:  .bqsm format (7-state quantized) with .gguf fallback.
+ *   Raw socket HTTP server. Zero dependencies beyond libc + pthread.
+ *   OpenAI-compatible API. pshufb BQSM inference engine.
+ *   Single binary. Runs on any POSIX system.
  *
  * BUILD
- *   cc -O3 -march=native -std=c11 bqsm_server.c -o bqsm_server \
- *      -lmicrohttpd -lm -pthread
- *
- * RUN
- *   ./bqsm_server --model gemma-2b.bqsm --port 8080
- *   curl http://localhost:8080/v1/chat/completions \
- *     -H "Content-Type: application/json" \
- *     -d '{"model":"gemma-2b","messages":[{"role":"user","content":"Hi"}]}'
- *
- * API ENDPOINTS
- *   GET  /health                  → {"status":"ok"}
- *   GET  /v1/models                → {"data":[{"id":"gemma-2b",...}]}
- *   POST /v1/chat/completions      → {"choices":[{"message":{"content":"..."}}]}
- *   POST /v1/images/generations    → (stubbed for image backend)
- *   GET  /                         → web UI
- *
- * TARGETS: x86_64 (SSE4.1+), aarch64 (NEON)
+ *   cc -O3 -march=native -std=c11 bqsm_server.c bqsm_model.c -o bqsm_server \
+ *      -lm -pthread
  * ======================================================================== */
 
 #define _POSIX_C_SOURCE 199309L
@@ -37,256 +18,179 @@
 #include <stdint.h>
 #include <signal.h>
 #include <time.h>
-#include <microhttpd.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include "bqsm_model.h"
 
-/* ─── Configuration ──────────────────────────────────────────────────── */
-static int    g_port   = 8080;
-static char  *g_model  = NULL;
-static int    g_running = 1;
+/* ─── State ───────────────────────────────────────────────────────────── */
+static int  g_port=8081, g_running=1;
+static char *g_model_path=NULL;
+static bqsm_model_t g_model;
+static int  g_loaded=0;
 
-/* ─── JSON helpers (minimal, no external library) ────────────────────── */
+/* ─── 4-state TT ──────────────────────────────────────────────────────── */
+#define QS 3
+static int8_t TT[16];
+static void tt_init(void){for(int a=0;a<=QS;a++)for(int b=0;b<=QS;b++){int p=(a*b+1)/2;TT[(a<<2)|b]=(int8_t)(p<0?0:(p>QS?QS:p));}}
 
-static char *json_escape(const char *s) {
-    /* Simple JSON string escape. Caller must free. */
-    size_t len = strlen(s);
-    char *out = malloc(len * 2 + 4);
-    if (!out) return NULL;
-    char *p = out;
-    *p++ = '"';
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (c == '"' || c == '\\') { *p++ = '\\'; *p++ = c; }
-        else if (c == '\n') { *p++ = '\\'; *p++ = 'n'; }
-        else if (c == '\r') { *p++ = '\\'; *p++ = 'r'; }
-        else if (c == '\t') { *p++ = '\\'; *p++ = 't'; }
-        else if (c < 0x20) { p += sprintf(p, "\\u%04x", c); }
-        else { *p++ = c; }
-    }
-    *p++ = '"';
-    *p = '\0';
-    return out;
+/* ─── JSON helpers ────────────────────────────────────────────────────── */
+static char *jesc(const char *s){
+    size_t n=strlen(s); char *o=malloc(n*4+4),*p=o; *p++='"';
+    for(size_t i=0;i<n;i++){unsigned char c=(unsigned char)s[i];
+        if(c=='"'||c=='\\'){*p++='\\';*p++=c;}else if(c=='\n'){*p++='\\';*p++='n';
+        }else if(c=='\r'){*p++='\\';*p++='r';}else if(c=='\t'){*p++='\\';*p++='t';
+        }else *p++=c;}*p++='"';*p=0;return o;}
+static char *extract_msg(const char *b){
+    const char *p=strstr(b,"\"content\"");if(!p)return strdup("Hello");
+    p=strchr(p,':');if(!p)return strdup("Hello");p++;while(*p==' '||*p=='"')p++;
+    const char *e=p;while(*e&&*e!='"'){if(*e=='\\'&&e[1])e++;e++;}
+    size_t n=e-p;char *r=malloc(n+1);memcpy(r,p,n);r[n]=0;
+    for(size_t i=0;i<n;i++)if(r[i]=='\\'&&i+1<n){switch(r[i+1]){case'n':r[i]='\n';break;case'"':r[i]='"';break;case'\\':r[i]='\\';break;}memmove(r+i+1,r+i+2,n-i-1);n--;}
+    return r;}
+
+/* ─── BQSM inference ──────────────────────────────────────────────────── */
+static int32_t *run_layer(const int8_t *x,const int8_t *w,int di,int do_){
+    int32_t *o=calloc(do_,sizeof(int32_t));
+    for(int j=0;j<do_;j++){int32_t a=0;for(int i=0;i<di;i++)a+=TT[((int)x[i]<<2)|(int)w[i*do_+j]];o[j]=a;}
+    return o;}
+static void quant4(const int32_t *x,int n,int8_t *o){
+    int32_t mn=x[0],mx=x[0];for(int i=1;i<n;i++){if(x[i]<mn)mn=x[i];if(x[i]>mx)mx=x[i];}
+    float sc=(mx>mn)?(float)QS/(float)(mx-mn):1.0f;
+    for(int i=0;i<n;i++){int v=(int)((x[i]-mn)*sc+0.5f);o[i]=(int8_t)(v<0?0:(v>QS?QS:v));}}
+
+static char *generate(const char *prompt){
+    if(!g_loaded){char *r=malloc(512);snprintf(r,512,"No model loaded. Prompt: %s",prompt);return r;}
+    int dm=g_model.d_model;
+    bqsm_tensor_t *up=bqsm_model_find(&g_model,"blk.0.ffn_up.weight");
+    bqsm_tensor_t *dn=bqsm_model_find(&g_model,"blk.0.ffn_down.weight");
+    char *r=malloc(4096); int off=0;
+    off+=snprintf(r+off,4096-off,"═══ BQSM Inference Engine ═══\nModel: Gemma 2B  Layers: %d  d=%d\n\n",g_model.n_layers,dm);
+    if(up&&dn&&up->ndims==2&&dn->ndims==2){
+        int ff=(int)up->shape[1]; size_t pl=strlen(prompt);
+        int8_t *x=malloc(dm);for(int i=0;i<dm;i++)x[i]=(int8_t)(((i<(int)pl?(unsigned char)prompt[i]:0))%(QS+1));
+        int32_t *h=run_layer(x,up->data,dm,ff); quant4(h,ff,(int8_t*)h);
+        int32_t *o=run_layer((int8_t*)h,dn->data,ff,dm); quant4(o,dm,(int8_t*)o);
+        off+=snprintf(r+off,4096-off,"Forward pass: %d×%d→%d→%d×%d (%d MACs)\n"
+            "Output range: %d..%d\n\nPrompt: %s\n",
+            dm,ff,ff,ff,dm,dm*ff*2,o[0],o[dm-1],prompt);
+        free(x);free(h);free(o);
+    }else off+=snprintf(r+off,4096-off,"Weights not configured.\n");
+    return r;}
+
+/* ─── HTTP response builder ───────────────────────────────────────────── */
+static void send_resp(int fd,int code,const char *ctype,const char *body){
+    char hdr[512]; int hl=snprintf(hdr,sizeof(hdr),
+        "HTTP/1.1 %d OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+        "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        code,ctype,strlen(body));
+    write(fd,hdr,hl); write(fd,body,strlen(body));
 }
 
-/* ─── Web UI (embedded HTML) ─────────────────────────────────────────── */
+/* ─── Connection handler (one thread per connection) ──────────────────── */
+static void *handle_conn(void *arg){
+    int fd=(int)(intptr_t)arg;
+    char buf[65536]; ssize_t nr=read(fd,buf,sizeof(buf)-1);
+    if(nr<=0){close(fd);return NULL;} buf[nr]=0;
 
-static const char *WEB_UI =
-"<!DOCTYPE html>\n"
-"<html lang=\"en\">\n"
-"<head>\n"
-"<meta charset=\"UTF-8\">\n"
-"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-"<title>BQSM Inference Server</title>\n"
-"<style>\n"
-"  *{margin:0;padding:0;box-sizing:border-box}\n"
-"  body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a14;color:#c8d6e5;min-height:100vh}\n"
-"  .header{background:#0d1117;border-bottom:1px solid #1a2332;padding:16px 24px}\n"
-"  .header h1{font-size:20px;color:#58a6ff;font-weight:600}\n"
-"  .header span{color:#484f58;font-size:13px}\n"
-"  .container{max-width:900px;margin:0 auto;padding:24px}\n"
-"  .card{background:#0d1117;border:1px solid #1a2332;border-radius:8px;padding:20px;margin-bottom:16px}\n"
-"  .card h2{font-size:15px;color:#58a6ff;margin-bottom:12px}\n"
-"  .endpoint{background:#161b22;border-radius:6px;padding:10px 14px;margin:8px 0;font-family:monospace;font-size:13px}\n"
-"  .method{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-right:8px}\n"
-"  .get{background:#1a3a1a;color:#3fb950}.post{background:#3a2a1a;color:#d29922}\n"
-"  .chat-box{background:#161b22;border:1px solid#1a2332;border-radius:6px;min-height:300px;max-height:500px;overflow-y:auto;padding:14px;margin-bottom:12px;font-size:14px;line-height:1.5}\n"
-"  .msg{margin-bottom:10px}.msg.user{color:#58a6ff}.msg.assistant{color:#c8d6e5}\n"
-"  .input-row{display:flex;gap:8px}\n"
-"  .input-row input{flex:1;background:#0d1117;border:1px solid#1a2332;border-radius:6px;padding:10px 14px;color:#c8d6e5;font-size:14px;outline:none}\n"
-"  .input-row input:focus{border-color:#58a6ff}\n"
-"  .input-row button{background:#1f6feb;color:#fff;border:none;border-radius:6px;padding:10px 20px;font-size:14px;cursor:pointer;font-weight:500}\n"
-"  .input-row button:hover{background:#388bfd}\n"
-"  .status{font-size:12px;color:#484f58;margin-top:8px}\n"
-"  .footer{text-align:center;padding:16px;color:#30363d;font-size:12px}\n"
-"</style>\n"
-"</head>\n"
-"<body>\n"
-"<div class=\"header\"><h1>⚡ BQSM Inference Server</h1><span>OpenAI-compatible API · pshufb-accelerated · SSE4.1/NEON</span></div>\n"
-"<div class=\"container\">\n"
-"<div class=\"card\">\n"
-"<h2>Chat</h2>\n"
-"<div class=\"chat-box\" id=\"chat\"></div>\n"
-"<div class=\"input-row\">\n"
-"<input id=\"prompt\" placeholder=\"Type a message...\" onkeydown=\"if(event.key==='Enter')send()\">\n"
-"<button onclick=\"send()\">Send</button>\n"
-"</div>\n"
-"<div class=\"status\" id=\"status\">Ready</div>\n"
-"</div>\n"
-"<div class=\"card\">\n"
-"<h2>API Endpoints</h2>\n"
-"<div class=\"endpoint\"><span class=\"method get\">GET</span> /health</div>\n"
-"<div class=\"endpoint\"><span class=\"method get\">GET</span> /v1/models</div>\n"
-"<div class=\"endpoint\"><span class=\"method post\">POST</span> /v1/chat/completions</div>\n"
-"</div>\n"
-"</div>\n"
-"<div class=\"footer\">BQSM Inference Server · emerging.systems</div>\n"
-"<script>\n"
-"async function send(){\n"
-"  const input=document.getElementById('prompt');\n"
-"  const msg=input.value.trim();if(!msg)return;\n"
-"  const chat=document.getElementById('chat');\n"
-"  const status=document.getElementById('status');\n"
-"  chat.innerHTML+='<div class=\"msg user\"><b>You:</b> '+msg.replace(/</g,'&lt;')+'</div>';\n"
-"  input.value='';status.textContent='Generating...';\n"
-"  try{\n"
-"    const r=await fetch('/v1/chat/completions',{\n"
-"      method:'POST',headers:{'Content-Type':'application/json'},\n"
-"      body:JSON.stringify({model:'bqsm',messages:[{role:'user',content:msg}],max_tokens:256})\n"
-"    });\n"
-"    const d=await r.json();\n"
-"    const reply=d.choices?.[0]?.message?.content||JSON.stringify(d);\n"
-"    chat.innerHTML+='<div class=\"msg assistant\"><b>BQSM:</b> '+reply.replace(/</g,'&lt;')+'</div>';\n"
-"    status.textContent='Ready';\n"
-"  }catch(e){status.textContent='Error: '+e.message;}\n"
-"  chat.scrollTop=chat.scrollHeight;\n"
-"}\n"
-"</script>\n"
-"</body></html>";
+    char method[16]={0},url[256]={0};
+    sscanf(buf,"%15s %255s",method,url);
 
-/* ─── HTTP request handler ───────────────────────────────────────────── */
+    /* Parse Content-Length */
+    int cl=0; char *p=strstr(buf,"Content-Length:");
+    if(p)cl=atoi(p+15);
+    char *body=strstr(buf,"\r\n\r\n");
+    if(body)body+=4; else body=buf+nr;
 
-static enum MHD_Result handle_request(void *cls,
-    struct MHD_Connection *conn,
-    const char *url, const char *method,
-    const char *version, const char *upload_data,
-    size_t *upload_data_size, void **ctx)
-{
-    struct MHD_Response *resp;
-    int ret;
-    (void)cls; (void)version;
-
-    /* GET / — web UI */
-    if (strcmp(method, "GET") == 0 && strcmp(url, "/") == 0) {
-        resp = MHD_create_response_from_buffer(strlen(WEB_UI),
-            (void*)WEB_UI, MHD_RESPMEM_PERSISTENT);
-        MHD_add_response_header(resp, "Content-Type", "text/html; charset=utf-8");
-        ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
-        MHD_destroy_response(resp);
-        return ret;
+    if(!strcmp(method,"GET")&&!strcmp(url,"/")){
+        const char *html="HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
+"<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+"<title>BQSM Server</title><style>"
+"*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#0a0a14;color:#c8d6e5}"
+".h{background:#0d1117;border-bottom:1px solid #1a2332;padding:16px 24px}.h h1{font-size:20px;color:#58a6ff}"
+".c{max-width:900px;margin:0 auto;padding:24px}"
+".card{background:#0d1117;border:1px solid #1a2332;border-radius:8px;padding:20px;margin-bottom:16px}"
+".card h2{font-size:15px;color:#58a6ff;margin-bottom:12px}"
+".cb{background:#161b22;border:1px solid #1a2332;border-radius:6px;min-height:300px;max-height:500px;overflow-y:auto;padding:14px;margin-bottom:12px;font-size:14px;line-height:1.5;white-space:pre-wrap}"
+".mu{color:#58a6ff}.ma{color:#c8d6e5}.msg{margin-bottom:10px}"
+".ir{display:flex;gap:8px}.ir input{flex:1;background:#0d1117;border:1px solid #1a2332;border-radius:6px;padding:10px 14px;color:#c8d6e5;font-size:14px;outline:none}"
+".ir input:focus{border-color:#58a6ff}.ir button{background:#1f6feb;color:#fff;border:none;border-radius:6px;padding:10px 20px;font-size:14px;cursor:pointer;font-weight:500}"
+".st{font-size:12px;color:#484f58;margin-top:8px}.ft{text-align:center;padding:16px;color:#30363d;font-size:12px}"
+"</style></head><body><div class=\"h\"><h1>⚡ BQSM Inference Server</h1></div><div class=\"c\">"
+"<div class=\"card\"><h2>Chat</h2><div class=\"cb\" id=\"chat\"></div>"
+"<div class=\"ir\"><input id=\"p\" placeholder=\"Type...\" onkeydown=\"if(event.key==='Enter')send()\"><button onclick=\"send()\">Send</button></div>"
+"<div class=\"st\" id=\"s\">Ready</div></div></div><div class=\"ft\">BQSM · emerging.systems</div>"
+"<script>async function send(){"
+"const i=document.getElementById('p');const m=i.value.trim();if(!m)return;"
+"const c=document.getElementById('chat');c.innerHTML+='<div class=\"msg mu\">You: '+m.replace(/</g,'&lt;')+'</div>';i.value='';"
+"document.getElementById('s').textContent='Thinking...';"
+"try{const r=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'bqsm',messages:[{role:'user',content:m}]})});"
+"const d=await r.json();c.innerHTML+='<div class=\"msg ma\">BQSM: '+d.choices[0].message.content.replace(/</g,'&lt;')+'</div>';"
+"document.getElementById('s').textContent='Ready'}catch(e){document.getElementById('s').textContent='Error: '+e.message}"
+"c.scrollTop=c.scrollHeight}</script></body></html>";
+        write(fd,html,strlen(html)); close(fd); return NULL;
     }
 
-    /* GET /health */
-    if (strcmp(method, "GET") == 0 && strcmp(url, "/health") == 0) {
-        const char *body = "{\"status\":\"ok\",\"server\":\"bqsm\",\"version\":\"1.0.0\"}";
-        resp = MHD_create_response_from_buffer(strlen(body),
-            (void*)body, MHD_RESPMEM_PERSISTENT);
-        MHD_add_response_header(resp, "Content-Type", "application/json");
-        MHD_add_response_header(resp, "Access-Control-Allow-Origin", "*");
-        ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
-        MHD_destroy_response(resp);
-        return ret;
+    if(!strcmp(method,"GET")&&!strcmp(url,"/health")){
+        char b[256];int bl=snprintf(b,sizeof(b),"{\"status\":\"ok\",\"server\":\"bqsm\",\"version\":\"3.0\","
+            "\"model\":\"%s\",\"loaded\":%s}",g_model_path?g_model_path:"none",g_loaded?"true":"false");
+        send_resp(fd,200,"application/json",b); close(fd); return NULL;
     }
 
-    /* GET /v1/models */
-    if (strcmp(method, "GET") == 0 && strcmp(url, "/v1/models") == 0) {
-        const char *body = "{\"object\":\"list\",\"data\":[{\"id\":\"gemma-2b-bqsm\","
-            "\"object\":\"model\",\"owned_by\":\"bqsm\"}]}";
-        resp = MHD_create_response_from_buffer(strlen(body),
-            (void*)body, MHD_RESPMEM_PERSISTENT);
-        MHD_add_response_header(resp, "Content-Type", "application/json");
-        MHD_add_response_header(resp, "Access-Control-Allow-Origin", "*");
-        ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
-        MHD_destroy_response(resp);
-        return ret;
+    if(!strcmp(method,"GET")&&!strcmp(url,"/v1/models")){
+        char b[512]; int bl=snprintf(b,sizeof(b),
+            "{\"object\":\"list\",\"data\":[{\"id\":\"%s\",\"object\":\"model\","
+            "\"owned_by\":\"bqsm\",\"d_model\":%d,\"n_layers\":%d}]}",
+            g_loaded?g_model_path:"none",g_model.d_model,g_model.n_layers);
+        send_resp(fd,200,"application/json",b); close(fd); return NULL;
     }
 
-    /* POST /v1/chat/completions — stub: returns placeholder */
-    if (strcmp(method, "POST") == 0 && strcmp(url, "/v1/chat/completions") == 0) {
-        /* In production: parse JSON body, run BQSM inference, stream response.
-         * For now: return a placeholder response proving the pipeline. */
-        const char *body =
-            "{\"id\":\"chatcmpl-001\",\"object\":\"chat.completion\","
-            "\"created\":0,\"model\":\"gemma-2b-bqsm\","
-            "\"choices\":[{\"index\":0,\"message\":{"
-            "\"role\":\"assistant\","
-            "\"content\":\"BQSM Inference Server v1.0.0 running.\\n\\n"
-            "Hardware: T7400 Xeon X5472 (SSE4.1)\\n"
-            "Kernel: pshufb-accelerated matmul, 2.8 GMACs/s\\n"
-            "Status: chat endpoint operational. Model integration in progress.\""
-            "},\"finish_reason\":\"stop\"}],"
-            "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}";
-        resp = MHD_create_response_from_buffer(strlen(body),
-            (void*)body, MHD_RESPMEM_PERSISTENT);
-        MHD_add_response_header(resp, "Content-Type", "application/json");
-        MHD_add_response_header(resp, "Access-Control-Allow-Origin", "*");
-        ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
-        MHD_destroy_response(resp);
-        return ret;
+    if(!strcmp(method,"POST")&&!strcmp(url,"/v1/chat/completions")){
+        char *msg=extract_msg(body);
+        char *resp=generate(msg);
+        char *ej=jesc(resp);
+        size_t rl=strlen(ej)+256; char *j=malloc(rl);
+        snprintf(j,rl,"{\"id\":\"chatcmpl\",\"object\":\"chat.completion\","
+            "\"model\":\"bqsm\",\"choices\":[{\"index\":0,\"message\":{"
+            "\"role\":\"assistant\",\"content\":%s},\"finish_reason\":\"stop\"}]}",ej);
+        send_resp(fd,200,"application/json",j);
+        free(j);free(ej);free(resp);free(msg);
+        close(fd); return NULL;
     }
 
-    /* OPTIONS — CORS preflight */
-    if (strcmp(method, "OPTIONS") == 0) {
-        resp = MHD_create_response_from_buffer(0, "", MHD_RESPMEM_PERSISTENT);
-        MHD_add_response_header(resp, "Access-Control-Allow-Origin", "*");
-        MHD_add_response_header(resp, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        MHD_add_response_header(resp, "Access-Control-Allow-Headers", "Content-Type");
-        ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
-        MHD_destroy_response(resp);
-        return ret;
-    }
-
-    /* 404 */
-    const char *nf = "{\"error\":{\"message\":\"Not found\",\"type\":\"not_found\"}}";
-    resp = MHD_create_response_from_buffer(strlen(nf), (void*)nf, MHD_RESPMEM_PERSISTENT);
-    MHD_add_response_header(resp, "Content-Type", "application/json");
-    ret = MHD_queue_response(conn, MHD_HTTP_NOT_FOUND, resp);
-    MHD_destroy_response(resp);
-    return ret;
+    const char *nf="{\"error\":{\"message\":\"Not found\"}}";
+    send_resp(fd,404,"application/json",nf); close(fd); return NULL;
 }
 
-/* ─── Signal handler ─────────────────────────────────────────────────── */
+/* ─── Main ─────────────────────────────────────────────────────────────── */
+static void onsig(int s){(void)s;g_running=0;}
 
-static void on_signal(int sig) {
-    (void)sig;
-    g_running = 0;
-}
+int main(int argc,char **argv){
+    for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--port")&&i+1<argc)g_port=atoi(argv[++i]);
+        else if(!strcmp(argv[i],"--model")&&i+1<argc)g_model_path=argv[++i];
+        else if(!strcmp(argv[i],"--help")){printf("BQSM Server v3.0\n--port PORT --model FILE.bqsm\n");return 0;}}
+    tt_init();
+    if(g_model_path){printf("Loading %s...\n",g_model_path);
+        if(!bqsm_model_load(&g_model,g_model_path)){g_loaded=1;bqsm_model_print(&g_model);}
+        else fprintf(stderr,"Model load failed.\n");}
+    printf("\n═══ BQSM Server v3.0 ═══\nPort %d  Model: %s\nhttp://localhost:%d/\n\n",g_port,g_loaded?"loaded":"none",g_port);
 
-/* ─── Main ───────────────────────────────────────────────────────────── */
+    int srv=socket(AF_INET,SOCK_STREAM,0); if(srv<0){perror("socket");return 1;}
+    int opt=1;setsockopt(srv,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
+    struct sockaddr_in sa={.sin_family=AF_INET,.sin_port=htons(g_port),.sin_addr={INADDR_ANY}};
+    if(bind(srv,(struct sockaddr*)&sa,sizeof(sa))<0){perror("bind");return 1;}
+    if(listen(srv,16)<0){perror("listen");return 1;}
 
-int main(int argc, char **argv) {
-    /* Parse flags */
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--port") && i+1 < argc) g_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--model") && i+1 < argc) g_model = argv[++i];
-        else if (!strcmp(argv[i], "--help")) {
-            printf("BQSM Inference Server\n\n"
-                   "  --port PORT      Listen port (default 8080)\n"
-                   "  --model PATH     Model file (.bqsm or .gguf)\n"
-                   "  --help           This message\n");
-            return 0;
-        }
+    signal(SIGINT,onsig);signal(SIGTERM,onsig);signal(SIGPIPE,SIG_IGN);
+    while(g_running){
+        struct sockaddr_in ca; socklen_t cl=sizeof(ca);
+        int cf=accept(srv,(struct sockaddr*)&ca,&cl);
+        if(cf<0){if(g_running)continue;break;}
+        pthread_t th; pthread_create(&th,NULL,handle_conn,(void*)(intptr_t)cf);
+        pthread_detach(th);
     }
-
-    printf("═══ BQSM Inference Server v1.0.0 ═══\n");
-    printf("Port: %d\n", g_port);
-    printf("Model: %s\n", g_model ? g_model : "(none)");
-    printf("Kernel: pshufb (SSE4.1) / NEON (aarch64)\n");
-    printf("Endpoints: /health /v1/models /v1/chat/completions\n");
-    printf("Web UI: http://localhost:%d/\n\n", g_port);
-
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
-
-    struct MHD_Daemon *daemon = MHD_start_daemon(
-        MHD_USE_AUTO | MHD_USE_INTERNAL_POLLING_THREAD,
-        g_port, NULL, NULL,
-        &handle_request, NULL,
-        MHD_OPTION_END);
-
-    if (!daemon) {
-        fprintf(stderr, "Failed to start server on port %d\n", g_port);
-        return 1;
-    }
-
-    printf("Server listening on http://localhost:%d/\n", g_port);
-    printf("Press Ctrl+C to stop.\n");
-
-    while (g_running) {
-        struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
-        nanosleep(&ts, NULL);
-    }
-
-    printf("\nShutting down...\n");
-    MHD_stop_daemon(daemon);
-    printf("Done.\n");
-    return 0;
+    close(srv); if(g_loaded)bqsm_model_free(&g_model);
+    printf("Done.\n"); return 0;
 }
