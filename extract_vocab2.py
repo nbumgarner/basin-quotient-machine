@@ -15,23 +15,23 @@ tok = reader.fields['tokenizer.ggml.tokens']
 parts = tok.parts
 data = tok.data
 
-# Extract tokens
-tokens = []
+# Extract tokens as raw bytes (no decode — many tokens contain non-UTF-8 bytes)
+tokens_raw = []
 for i in range(len(data)):
     idx = data[i]
-    token_bytes = bytes(parts[idx])
-    tokens.append((token_bytes, i))  # (bytes, original_id)
+    tb = bytes(parts[idx])  # raw bytes, no decode
+    tokens_raw.append((tb, i))  # (bytes, original_id)
 
-print(f"Extracted {len(tokens)} tokens, max_len={max(len(t) for t,_ in tokens)}")
+print(f"Extracted {len(tokens_raw)} tokens, max_len={max(len(t) for t,_ in tokens_raw)}")
 
 # Sort by token bytes for binary search
-tokens.sort(key=lambda x: x[0])
+tokens_raw.sort(key=lambda x: x[0])
 
 # Build concatenated data + index
 data_bytes = b''
 index = []  # (offset, length, token_id)
 offset = 0
-for tb, tid in tokens:
+for tb, tid in tokens_raw:
     index.append((offset, len(tb), tid))
     data_bytes += tb
     offset += len(tb)
@@ -39,7 +39,7 @@ for tb, tid in tokens:
 # Write C header
 with open(OUT_H, 'w') as f:
     f.write(f"""/* Auto-generated — SentencePiece vocab for Gemma 2B
- * {len(tokens)} tokens, {len(data_bytes):,} bytes concatenated.
+ * {len(tokens_raw)} tokens, {len(data_bytes):,} bytes concatenated.
  * Sorted alphabetically for binary search.
  * Greedy longest-match tokenizer uses sp_tokenize(). */
 #ifndef BQSM_VOCAB_H
@@ -49,9 +49,9 @@ with open(OUT_H, 'w') as f:
 #include <string.h>
 #include <stdlib.h>
 
-#define SP_VOCAB_SIZE {len(tokens)}
+#define SP_VOCAB_SIZE {len(tokens_raw)}
 #define SP_VOCAB_DATA_LEN {len(data_bytes)}
-#define SP_MAX_TOKEN_LEN {max(len(t) for t,_ in tokens)}
+#define SP_MAX_TOKEN_LEN {max(len(t) for t,_ in tokens_raw)}
 
 """)
     
@@ -63,7 +63,7 @@ with open(OUT_H, 'w') as f:
     f.write("};\n\n")
     
     # Index: {uint32_t offset, uint16_t len, uint32_t id}
-    f.write(f"static const struct {{ uint32_t off; uint16_t len; uint32_t id; }} sp_vocab_index[{len(tokens)}] = {{\n")
+    f.write(f"static const struct {{ uint32_t off; uint16_t len; uint32_t id; }} sp_vocab_index[{len(tokens_raw)}] = {{\n")
     for off, ln, tid in index:
         f.write(f"  {{{off}U, {ln}U, {tid}U}},\n")
     f.write("};\n\n")
@@ -120,9 +120,8 @@ static int sp_tokenize(const unsigned char *text, int text_len, int max_tokens, 
 """)
 
 print(f"Wrote {OUT_H}")
-print(f"Sample sorted tokens (first 10): {[(tokens[i][0][:20].decode('utf-8','replace'), tokens[i][1]) for i in range(10)]}")
+print(f"Sample sorted tokens (first 10): {[(repr(tokens_raw[i][0][:20]), tokens_raw[i][1]) for i in range(10)]}")
 print(f"Sample sorted tokens (around 'hello'):")
-for i, (tb, tid) in enumerate(tokens):
-    s = tb.decode('utf-8', errors='replace')
-    if 'hello' in s.lower() or 'Hello' in s:
-        print(f"  [{i}] id={tid}: {s}")
+for i, (tb, tid) in enumerate(tokens_raw):
+    if b'hello' in tb.lower() or b'Hello' in tb:
+        print(f"  [{i}] id={tid}: {repr(tb[:50])}")

@@ -376704,18 +376704,12 @@ static const struct { uint32_t off; uint16_t len; uint32_t id; } sp_vocab_index[
 
 /* Binary search: find token matching (str, slen). Returns token ID or -1. */
 static int32_t sp_find_token(const unsigned char *str, int slen) {
-    int lo = 0, hi = SP_VOCAB_SIZE - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        int mlen = sp_vocab_index[mid].len;
-        int off  = sp_vocab_index[mid].off;
-        int cmp = slen - mlen;
-        if (cmp == 0) {
-            cmp = memcmp(str, sp_vocab_data + off, slen);
+    /* Linear scan over sorted vocab. Replace with binary search after verification. */
+    for (int i = 0; i < SP_VOCAB_SIZE; i++) {
+        if (sp_vocab_index[i].len == slen &&
+            memcmp(str, sp_vocab_data + sp_vocab_index[i].off, slen) == 0) {
+            return (int32_t)sp_vocab_index[i].id;
         }
-        if (cmp < 0) hi = mid - 1;
-        else if (cmp > 0) lo = mid + 1;
-        else return (int32_t)sp_vocab_index[mid].id;
     }
     return -1;
 }

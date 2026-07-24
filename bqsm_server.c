@@ -210,69 +210,115 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     return r;
 }
 
-/* ─── Generate (SentencePiece tokenizer + embedding lookup) ──────────────── */
+/* ─── Generate (SentencePiece tokenizer, sequential multi-token) ─────────── */
 static char *generate(const char *prompt){
     if(!g_loaded)return strdup("No model loaded.");
     int dm=g_model.d_model;
 
-    /* Tokenize with SentencePiece greedy longest-match */
+    /* Build normalized input: replace leading/trailing space with ▁ (U+2581).
+     * SentencePiece uses ▁ as word boundary marker. */
+    char norm[1024];
+    int nl = snprintf(norm, sizeof(norm), " %s", prompt);
+    if (nl >= (int)sizeof(norm)) nl = (int)sizeof(norm) - 1;
+    /* Replace spaces with ▁ (UTF-8: 0xE2 0x96 0x81) */
+    char sp_norm[2048]; int sp_nl = 0;
+    for (int i = 0; i < nl && sp_nl < (int)sizeof(sp_norm) - 4; i++) {
+        if (norm[i] == ' ') {
+            sp_norm[sp_nl++] = (char)0xE2;
+            sp_norm[sp_nl++] = (char)0x96;
+            sp_norm[sp_nl++] = (char)0x81;
+        } else {
+            sp_norm[sp_nl++] = norm[i];
+        }
+    }
+    sp_norm[sp_nl] = 0;
+
+    /* Tokenize */
     int32_t *token_ids = NULL;
-    int n_tokens = sp_tokenize((const unsigned char*)prompt, (int)strlen(prompt), 64, &token_ids);
-    if (n_tokens <= 0) {
-        free(token_ids);
-        return strdup("Tokenization failed.");
+    int n_tokens = sp_tokenize((const unsigned char*)sp_norm, sp_nl, 64, &token_ids);
+    if (n_tokens <= 0) { free(token_ids); return strdup("Tokenization failed."); }
+
+    /* Prepend <bos> (ID 2). Shift tokens right, insert BOS at position 0. */
+    if (n_tokens < 63) {
+        memmove(token_ids + 1, token_ids, (size_t)n_tokens * sizeof(int32_t));
+        token_ids[0] = 1;  /* <bos> */
+        n_tokens++;
     }
 
-    /* Embedding lookup: for each token, extract ternary embedding from token_embd.
-     * token_embd.weight has shape [d_model, vocab_size] = [2304, 256000].
-     * Packed ternary: each token occupies d_model/4 = 576 bytes.
-     * Use the first token as the input embedding, average if multiple tokens.
-     * Scale to target RMS=32. */
+    /* Embedding lookup from token_embd.weight */
     bqsm_tensor_t *emb = bqsm_model_find(&g_model, "token_embd.weight");
-    int8_t *embed = calloc((size_t)dm, 1);
-    if (!emb || !embed) { free(token_ids); free(embed); return strdup("No embedding."); }
-
+    if (!emb) { free(token_ids); return strdup("No embedding tensor."); }
     const uint8_t *emb_data = (const uint8_t*)emb->data;
-    int stride = dm / 4;  /* bytes per token in packed format */
+    int stride = dm / 4;
 
-    /* Accumulate embeddings from all tokens, then average */
-    int32_t *acc_embed = calloc((size_t)dm, sizeof(int32_t));
-    if (!acc_embed) { free(token_ids); free(embed); return strdup("OOM"); }
-
-    for (int t = 0; t < n_tokens; t++) {
+    /* Process each token sequentially through the forward pass.
+     * Each call populates one position in the KV cache. */
+    char *last_result = NULL;
+    for (int t = 0; t < n_tokens && t < 16; t++) {
         int tid = token_ids[t];
         if (tid < 0 || tid >= (int)emb->shape[1]) continue;
+
+        /* Extract embedding for this token */
         const uint8_t *row = emb_data + (size_t)tid * (size_t)stride;
+        int32_t *acc_embed = calloc((size_t)dm, sizeof(int32_t));
+        if (!acc_embed) break;
+
         for (int i = 0; i < dm; i++) {
             int byte_idx = i / 4;
             int shift    = (i & 3) * 2;
             int nb       = (row[byte_idx] >> shift) & 3;
-            /* Ternary LUT: {0:-1, 1:0, 2:+1, 3:0} */
             static const int8_t tern[4] = {-1, 0, 1, 0};
-            acc_embed[i] += (int32_t)tern[nb];
+            acc_embed[i] = (int32_t)tern[nb];
         }
+
+        /* Scale to target RMS=32 */
+        float sum_sq = 0.0f;
+        for (int i = 0; i < dm; i++) sum_sq += (float)(acc_embed[i] * acc_embed[i]);
+        float rms = sqrtf(sum_sq / (float)dm + 1e-8f);
+        float scale = (rms > 1e-8f) ? 32.0f / rms : 1.0f;
+
+        int8_t *embed = malloc((size_t)dm);
+        if (!embed) { free(acc_embed); break; }
+        for (int i = 0; i < dm; i++) {
+            int32_t iv = (int32_t)lrintf((float)acc_embed[i] * scale);
+            embed[i] = (int8_t)(iv < -128 ? -128 : (iv > 127 ? 127 : iv));
+        }
+        free(acc_embed);
+
+        /* Forward pass — accumulates KV cache, returns stats */
+        char *result = forward_pass(embed, dm, prompt);
+        free(embed);
+        if (last_result) free(last_result);
+        last_result = result;
     }
 
-    /* Average and scale to target RMS=32 */
-    float sum_sq = 0.0f;
-    for (int i = 0; i < dm; i++) {
-        float v = (float)acc_embed[i] / (float)n_tokens;
-        sum_sq += v * v;
-    }
-    float rms = sqrtf(sum_sq / (float)dm + 1e-8f);
-    float scale = (rms > 1e-8f) ? 32.0f / rms : 1.0f;
-    for (int i = 0; i < dm; i++) {
-        float v = (float)acc_embed[i] * scale / (float)n_tokens;
-        int32_t iv = (int32_t)lrintf(v);
-        embed[i] = (int8_t)(iv < -128 ? -128 : (iv > 127 ? 127 : iv));
-    }
-
-    free(acc_embed);
     free(token_ids);
+    if (!last_result) return strdup("No tokens processed.");
 
-    char *result = forward_pass(embed, dm, prompt);
-    free(embed);
-    return result;
+    /* Prepend token ID info */
+    char token_info[512]; int ti_off = 0;
+    ti_off += snprintf(token_info + ti_off, sizeof(token_info) - ti_off,
+        "Tokens: %d IDs=[", n_tokens);
+    // Re-tokenize to show IDs (token_ids was freed, but we can extract from response)
+    int32_t *tid_check = NULL;
+    int nt2 = sp_tokenize((const unsigned char*)sp_norm, sp_nl, 64, &tid_check);
+    if (nt2 > 0) {
+        if (nt2 < 63) { memmove(tid_check+1, tid_check, (size_t)nt2*4); tid_check[0]=1 /* <bos> */; nt2++; }
+        for (int i = 0; i < nt2 && i < 10 && ti_off < (int)sizeof(token_info)-20; i++)
+            ti_off += snprintf(token_info + ti_off, sizeof(token_info) - ti_off,
+                "%s%d", i?",":"", tid_check[i]);
+        if (nt2 > 10) ti_off += snprintf(token_info + ti_off, sizeof(token_info) - ti_off, ",...");
+        free(tid_check);
+    }
+    ti_off += snprintf(token_info + ti_off, sizeof(token_info) - ti_off, "]\n\n");
+
+    /* Combine token info + result */
+    size_t rlen = strlen(last_result);
+    char *combined = malloc(ti_off + rlen + 1);
+    memcpy(combined, token_info, ti_off);
+    memcpy(combined + ti_off, last_result, rlen + 1);
+    free(last_result);
+    return combined;
 }
 
 /* ─── JSON helpers ──────────────────────────────────────────────────────── */
