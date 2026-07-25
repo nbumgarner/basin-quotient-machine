@@ -299,12 +299,16 @@ static void bqsm_attention_layer(
      * Raw int32 accumulator written to o_raw for caller to scale+residual. */
     if (o_w) {
             const uint8_t *wp = (const uint8_t *)o_w->data;
+            /* o_weight shape: [q_dim, d_model] in GGUF (transposed for matmul)
+             * attn_cat: [q_dim], out: [d_model]
+             * out[j] = sum_i attn_cat[i] * weight[i, j] */
             int n_in    = (int)o_w->shape[0];  /* q_dim */
             int n_out   = (int)o_w->shape[1];  /* d_model */
             /* Zero output accumulator */
-            for (int i = 0; i < n_out; i++) {
-                o_raw[i] = 0;
+            for (int j = 0; j < n_out; j++) {
+                o_raw[j] = 0;
             }
+            /* Transposed matmul: out = attn_cat^T @ weight */
             for (int i = 0; i < n_in; i++) {
                 float x_val = attn_cat[i];
                 for (int j = 0; j < n_out; j++) {
@@ -317,10 +321,10 @@ static void bqsm_attention_layer(
                 }
             }
             /* Scale output */
-            for (int i = 0; i < n_out; i++) {
-                float v = (float)o_raw[i] / (float)(n_in * 2) + 1.5f;
+            for (int j = 0; j < n_out; j++) {
+                float v = (float)o_raw[j] / (float)n_in + 1.5f;
                 int iv = (int)(v < 0 ? 0 : (v > BQSM_Q ? BQSM_Q : v));
-                out[i] = (int8_t)iv;
+                out[j] = (int8_t)iv;
             }
         } else {
             memset(o_raw, 0, (size_t)d_model * sizeof(int32_t));
