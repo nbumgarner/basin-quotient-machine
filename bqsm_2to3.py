@@ -53,13 +53,16 @@ def convert(input_path, output_path):
                 else:
                     packed = data
                 
+                # Set tensor_type to 7 (3-bit) for all converted tensors
+                new_ttype = 7 if ttype != 1 else ttype
+                
                 out.write(struct.pack('<H', name_len))
                 out.write(name.encode('utf-8'))
                 out.write(struct.pack('<B', ndims))
                 for dim in shape:
                     out.write(struct.pack('<Q', dim))
                 out.write(struct.pack('<I', orig_n))
-                out.write(struct.pack('<B', ttype))
+                out.write(struct.pack('<B', new_ttype))  # Use 7 for 3-bit
                 out.write(struct.pack('<I', len(packed)))
                 out.write(packed)
                 
