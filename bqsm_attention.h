@@ -27,6 +27,7 @@
 #include <math.h>
 #include "bqsm_model.h"
 #include "bqsm_kernel.h"
+#include "bqsm_kernel_3bit.h"  /* 3-bit quantization support */
 
 /* ─── Gemma-2-2B architecture constants (hardcoded until model format carries them) */
 #define ATT_HEAD_DIM      256    /* NOT d_model/n_heads! */
@@ -156,9 +157,18 @@ static void bqsm_attention_layer(
         return;
     }
 
-    if (q_w) bqsm_matmul_vec(x, q_w->data, d_model, q_dim,  q_acc);
-    if (k_w) bqsm_matmul_vec(x, k_w->data, d_model, kv_dim, k_acc);
-    if (v_w) bqsm_matmul_vec(x, v_w->data, d_model, kv_dim, v_acc);
+    if (q_w) {
+        if (q_w->tensor_type == 7) bqsm_matmul_vec_3bit(x, q_w->data, d_model, q_dim, q_acc);
+        else bqsm_matmul_vec(x, q_w->data, d_model, q_dim,  q_acc);
+    }
+    if (k_w) {
+        if (k_w->tensor_type == 7) bqsm_matmul_vec_3bit(x, k_w->data, d_model, kv_dim, k_acc);
+        else bqsm_matmul_vec(x, k_w->data, d_model, kv_dim, k_acc);
+    }
+    if (v_w) {
+        if (v_w->tensor_type == 7) bqsm_matmul_vec_3bit(x, v_w->data, d_model, kv_dim, v_acc);
+        else bqsm_matmul_vec(x, v_w->data, d_model, kv_dim, v_acc);
+    }
 
     float sc_q = 1.0f, sc_kv = 1.0f;  /* Q/K quantization scales, used in logit dequant */
 
@@ -292,23 +302,39 @@ static void bqsm_attention_layer(
     }
 
     /* ── Output projection: attn_cat [q_dim] → o_weight [d_model][q_dim] → out [d_model] ── */
-    /* o_weight is stored as [d_model rows × q_dim cols] packed 2-bit.
+    /* o_weight is stored as [d_model rows × q_dim cols] packed quantized.
      * We need: out[i] = sum_j attn_cat[j] * weight[i][j]
      * This is a transpose matmul — can't use bqsm_matmul_vec directly.
      * Scalar loop (one per layer per token — negligible).
      * Raw int32 accumulator written to o_raw for caller to scale+residual. */
     if (o_w) {
-            const uint8_t *wp = (const uint8_t *)o_w->data;
-            /* o_weight shape: [q_dim, d_model] in GGUF (transposed for matmul)
-             * attn_cat: [q_dim], out: [d_model]
-             * out[j] = sum_i attn_cat[i] * weight[i, j] */
-            int n_in    = (int)o_w->shape[0];  /* q_dim */
-            int n_out   = (int)o_w->shape[1];  /* d_model */
-            /* Zero output accumulator */
-            for (int j = 0; j < n_out; j++) {
-                o_raw[j] = 0;
+        const uint8_t *wp = (const uint8_t *)o_w->data;
+        /* o_weight shape: [q_dim, d_model] in GGUF (transposed for matmul)
+         * attn_cat: [q_dim], out: [d_model]
+         * out[j] = sum_i attn_cat[i] * weight[i, j] */
+        int n_in    = (int)o_w->shape[0];  /* q_dim */
+        int n_out   = (int)o_w->shape[1];  /* d_model */
+        int quant_type = o_w->tensor_type;  /* 3=2-bit ternary, 7=3-bit */
+        /* Zero output accumulator */
+        for (int j = 0; j < n_out; j++) {
+            o_raw[j] = 0;
+        }
+        /* Transposed matmul: out = attn_cat^T @ weight */
+        if (quant_type == 7) {
+            /* 3-bit: 2 values per byte, high/low nibble */
+            for (int i = 0; i < n_in; i++) {
+                float x_val = attn_cat[i];
+                for (int j = 0; j < n_out; j++) {
+                    int byte_idx = (i * n_out + j) / 2;
+                    int shift = ((i * n_out + j) % 2) * 4;
+                    int nb = (wp[byte_idx] >> shift) & 0x0F;
+                    nb = nb & 7;  /* Mask to 3 bits */
+                    float w = bqsm_3bit_lut[nb];
+                    o_raw[j] += (int32_t)(x_val * w);
+                }
             }
-            /* Transposed matmul: out = attn_cat^T @ weight */
+        } else {
+            /* 2-bit ternary: 4 values per byte */
             for (int i = 0; i < n_in; i++) {
                 float x_val = attn_cat[i];
                 for (int j = 0; j < n_out; j++) {
@@ -320,13 +346,14 @@ static void bqsm_attention_layer(
                     o_raw[j] += (int32_t)(x_val * (float)w);
                 }
             }
-            /* Scale output */
-            for (int j = 0; j < n_out; j++) {
-                float v = (float)o_raw[j] / (float)n_in + 1.5f;
-                int iv = (int)(v < 0 ? 0 : (v > BQSM_Q ? BQSM_Q : v));
-                out[j] = (int8_t)iv;
-            }
-        } else {
+        }
+        /* Scale output */
+        for (int j = 0; j < n_out; j++) {
+            float v = (float)o_raw[j] / (float)n_in + 1.5f;
+            int iv = (int)(v < 0 ? 0 : (v > BQSM_Q ? BQSM_Q : v));
+            out[j] = (int8_t)iv;
+        }
+    } else {
             memset(o_raw, 0, (size_t)d_model * sizeof(int32_t));
             memcpy(out, x, (size_t)d_model);
         }
