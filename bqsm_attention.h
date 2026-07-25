@@ -178,7 +178,9 @@ static void bqsm_attention_layer(
 
     free(q_acc); free(k_acc); free(v_acc);
 
-    /* Debias V per head: remove DC from ternary weight asymmetry */
+    /* Debias V per head: remove DC from ternary weight asymmetry, then scale down.
+     * V weights have alpha ~0.014 vs Q/K ~0.09 — 6× smaller in float.
+     * BQSM quantizes all to RMS=32, so V is 6× too hot. Scale down. */
     for (int kvh = 0; kvh < n_kvh; kvh++) {
         int32_t mean = 0;
         int8_t *vh = v_out + kvh * hd;
