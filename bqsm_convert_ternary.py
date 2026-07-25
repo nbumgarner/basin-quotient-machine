@@ -66,11 +66,10 @@ def dequant_q6(raw, nelems, chunk_blks=32768):
         bstart = start * 210; bend = end * 210
         blocks = raw[bstart:bend].reshape(nbc, 210)
         
-        d = blocks[:, 0:2].view(np.float16).flatten().astype(np.float32)
-        # NaN safety
-        d = np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
-        ql = blocks[:, 2:130]; qh = blocks[:, 130:194]
-        scales = blocks[:, 194:210].astype(np.float32)  # (nbc, 16) int8 scales
+        # Q6_K layout: ql[0:128], qh[128:192], scales_int8[192:208], d_fp16[208:210]
+        ql = blocks[:, 0:128]; qh = blocks[:, 128:192]
+        scales = blocks[:, 192:208].view(np.int8).astype(np.float32)  # signed int8
+        d = blocks[:, 208:210].view(np.float16).flatten().astype(np.float32)
         
         lo = np.empty((nbc, 256), dtype=np.float32)
         lo[:, 0::2] = (ql & 0x0F).astype(np.float32)

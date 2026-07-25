@@ -30,6 +30,7 @@
 #include "bqsm_tokenizer.h"
 #include "bqsm_debug.h"
 #include "bqsm_attention.h"
+#include "checkpoint_dump.h"
 
 /* ─── State ──────────────────────────────────────────────────────────────── */
 static int  g_port=8081, g_running=1, g_n_layers=2;
@@ -98,6 +99,8 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
     int32_t *o_raw=malloc(dm * sizeof(int32_t));
     int nl_used = g_n_layers < m->n_layers ? g_n_layers : m->n_layers;
 
+    CP_DUMP("embed", x, dm);
+
     /* One-time KV cache allocation */
     if (!g_kv_caches) {
         g_kv_caches = att_kv_alloc(nl_used, 8192, ATT_LOCAL_WINDOW);
@@ -130,9 +133,13 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
             bqsm_attention_layer(tmp, dm, qw, kw, vw, ow, L, g_kv_caches, attn_out, o_raw,
                 g_attn_weights ? g_attn_weights + (size_t)L * ATT_N_Q_HEADS * 8192 : NULL);
 
-            /* Residual: int32 add x + o_raw at matched scale, requantize */
+            /* Pre-attention checkpoint: x before residual */
+            { char lb[32]; snprintf(lb,sizeof(lb),"L%d_pre",L); CP_DUMP(lb, x, dm); }
+
+            /* Residual: add x + o_raw in int32, requantize */
             for(int i=0;i<dm;i++) o_raw[i] += (int32_t)x[i];
             requantize_i8(o_raw, dm, 32.0f, x);
+            { char lb[32]; snprintf(lb,sizeof(lb),"L%d_attn",L); CP_DUMP(lb, x, dm); }
             float am=0; for(int i=0;i<dm;i++) am+=x[i];
             if(nstats<26){ stats[nstats].attn_m = am/dm; }
 
@@ -142,19 +149,66 @@ static char *forward_pass(const int8_t *embedding, int d_model, const char *prom
             free(attn_out);
         }
 
-        /* ── FFN (signed) ──────────────────────────────────────────── */
+        /* ── FFN: GeGLU (gate, GELU, up, down) ──────────────────────────── */
         snprintf(name,sizeof(name),"blk.%d.ffn_norm.weight",L);
         const float *fn_w = get_norm_f32(m, name);
         if(fn_w){
             rms_norm_signed(x, fn_w, dm, tmp);
+            snprintf(name,sizeof(name),"blk.%d.ffn_gate.weight",L);
+            bqsm_tensor_t *gate_w = bqsm_model_find(m, name);
+            snprintf(name,sizeof(name),"blk.%d.ffn_up.weight",L);
+            bqsm_tensor_t *up_w = bqsm_model_find(m, name);
             snprintf(name,sizeof(name),"blk.%d.ffn_down.weight",L);
-            bqsm_tensor_t *down=bqsm_model_find(m,name);
-            if(down){
-                bqsm_matmul_vec(tmp, down->data, ff, dm, acc);
-                /* Residual: int32 add, requantize */
-                for(int i=0;i<dm;i++) acc[i] += (int32_t)x[i];
-                requantize_i8(acc, dm, 32.0f, x);
-                total_macs += (int64_t)ff*dm;
+            bqsm_tensor_t *down_w = bqsm_model_find(m, name);
+            if (gate_w && up_w && down_w) {
+                int32_t *gate_acc = calloc((size_t)ff, sizeof(int32_t));
+                int32_t *up_acc   = calloc((size_t)ff, sizeof(int32_t));
+                int32_t *glu      = calloc((size_t)ff, sizeof(int32_t));
+                if (gate_acc && up_acc && glu) {
+                    bqsm_matmul_vec(tmp, gate_w->data, dm, ff, gate_acc);
+                    bqsm_matmul_vec(tmp, up_w->data,   dm, ff, up_acc);
+                    /* Quantize gate/up to int8 before GELU multiply */
+                    int8_t *gate_i8 = malloc((size_t)ff);
+                    int8_t *up_i8   = malloc((size_t)ff);
+                    if (gate_i8 && up_i8) {
+                        float rs_g = 0.0f, rs_u = 0.0f;
+                        for (int i = 0; i < ff; i++) { rs_g += (float)gate_acc[i]*gate_acc[i]; rs_u += (float)up_acc[i]*up_acc[i]; }
+                        float rms_g = sqrtf(rs_g/(float)ff+1e-8f), rms_u = sqrtf(rs_u/(float)ff+1e-8f);
+                        float sc_g = (rms_g>1e-8f)?32.0f/rms_g:1.0f, sc_u = (rms_u>1e-8f)?32.0f/rms_u:1.0f;
+                        for (int i = 0; i < ff; i++) {
+                            gate_i8[i] = (int8_t)(lrintf((float)gate_acc[i]*sc_g) < -128 ? -128 : (lrintf((float)gate_acc[i]*sc_g) > 127 ? 127 : lrintf((float)gate_acc[i]*sc_g)));
+                            up_i8[i]   = (int8_t)(lrintf((float)up_acc[i]*sc_u) < -128 ? -128 : (lrintf((float)up_acc[i]*sc_u) > 127 ? 127 : lrintf((float)up_acc[i]*sc_u)));
+                        }
+                        /* GELU(gate_i8) × up_i8 in float, then requantize to int8 for down projection */
+                        for (int i = 0; i < ff; i++) {
+                            float gv = (float)gate_i8[i];
+                            float tanh_arg = 0.7978845608f * (gv + 0.044715f * gv * gv * gv);
+                            float gv_gelu = 0.5f * gv * (1.0f + tanhf(tanh_arg));
+                            glu[i] = (int32_t)(gv_gelu * (float)up_i8[i]);
+                        }
+                        /* Down projection: quantize glu to int8 for matmul */
+                        int8_t *glu_i8 = malloc((size_t)ff);
+                        if (glu_i8) {
+                            float rs = 0.0f;
+                            for (int i = 0; i < ff; i++) rs += (float)(glu[i] * glu[i]);
+                            float rms_g = sqrtf(rs / (float)ff + 1e-8f);
+                            float sc_g = (rms_g > 1e-8f) ? 32.0f / rms_g : 1.0f;
+                            for (int i = 0; i < ff; i++) {
+                                int32_t iv = (int32_t)lrintf((float)glu[i] * sc_g);
+                                glu_i8[i] = (int8_t)(iv < -128 ? -128 : (iv > 127 ? 127 : iv));
+                            }
+                            bqsm_matmul_vec(glu_i8, down_w->data, ff, dm, acc);
+                            free(glu_i8);
+                            /* Residual: add x + acc in int32, requantize */
+                            for(int i=0;i<dm;i++) acc[i] += (int32_t)x[i];
+                            requantize_i8(acc, dm, 32.0f, x);
+                            total_macs += (int64_t)ff * dm * 3;
+                            free(gate_i8); free(up_i8);
+                        }
+                    }
+                }
+                free(gate_acc); free(up_acc); free(glu);
+                { char lb[32]; snprintf(lb,sizeof(lb),"L%d_ffn",L); CP_DUMP(lb, x, dm); }
             }
         }
 
@@ -273,15 +327,15 @@ static char *generate(const char *prompt){
         int tid = token_ids[t];
         if (tid < 0 || tid >= (int)emb->shape[1]) continue;
 
-        /* Extract embedding for this token */
-        const uint8_t *row = emb_data + (size_t)tid * (size_t)stride;
+        /* Extract embedding COLUMN for this token (matrix is [d_model, vocab] row-major).
+         * Column tid: for each dimension i, byte = i*(vocab/4) + tid/4, shift = 2*(tid&3). */
+        int vocab_by4 = (int)(emb->shape[1]) / 4;  /* 64000 for 256K vocab */
         int32_t *acc_embed = calloc((size_t)dm, sizeof(int32_t));
         if (!acc_embed) break;
-
         for (int i = 0; i < dm; i++) {
-            int byte_idx = i / 4;
-            int shift    = (i & 3) * 2;
-            int nb       = (row[byte_idx] >> shift) & 3;
+            int byte_idx = i * vocab_by4 + tid / 4;
+            int shift    = 2 * (tid & 3);
+            int nb       = (emb_data[byte_idx] >> shift) & 3;
             static const int8_t tern[4] = {-1, 0, 1, 0};
             acc_embed[i] = (int32_t)tern[nb];
         }
