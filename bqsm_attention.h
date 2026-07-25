@@ -178,6 +178,18 @@ static void bqsm_attention_layer(
 
     free(q_acc); free(k_acc); free(v_acc);
 
+    /* Debias V per head: remove DC from ternary weight asymmetry */
+    for (int kvh = 0; kvh < n_kvh; kvh++) {
+        int32_t mean = 0;
+        int8_t *vh = v_out + kvh * hd;
+        for (int d = 0; d < hd; d++) mean += (int32_t)vh[d];
+        mean /= hd;
+        for (int d = 0; d < hd; d++) {
+            int32_t v = (int32_t)vh[d] - mean;
+            vh[d] = (int8_t)(v < -128 ? -128 : (v > 127 ? 127 : v));
+        }
+    }
+
     /* ── Store K/V in cache ─────────────────────────────────────────── */
     att_kv_store(kv_cache, layer, k_out, v_out, hd);
     int seq_len = kv_cache[layer].seq_len;
@@ -225,6 +237,10 @@ static void bqsm_attention_layer(
 
         /* Softmax */
         att_softmax(scores, n_valid);
+        /* DEBUG: verify sum=1 */
+        { float s=0; for(int p=0;p<n_valid;p++) s+=scores[p];
+          fprintf(stderr,"attn L%d H%d n=%d sum=%f [%f %f %f]\n",layer,qh,n_valid,s,
+            n_valid>0?scores[0]:-1,n_valid>1?scores[1]:-1,n_valid>2?scores[2]:-1); }
 
         /* Output attention weights if requested */
         if (attn_weights) {
@@ -254,6 +270,25 @@ static void bqsm_attention_layer(
 
     free(scores); free(head_out);
     free(q_out); free(k_out); free(v_out);
+
+    /* Pre-O-projection checkpoint: dump weighted-V output */
+    if (attn_weights) {  /* reuse attn_weights flag as "checkpoint requested" */
+        char fn[128]; snprintf(fn, sizeof(fn), "/tmp/bqsm_L%d_preO.bin", layer);
+        FILE *f = fopen(fn, "wb");
+        if (f) {  /* dump as int8 quantization of attn_cat */
+            int8_t *tmp_i8 = malloc((size_t)q_dim);
+            float rs = 0;
+            for (int i = 0; i < q_dim; i++) rs += attn_cat[i] * attn_cat[i];
+            float rms = sqrtf(rs / (float)q_dim + 1e-8f);
+            float sc = (rms > 1e-8f) ? 32.0f / rms : 1.0f;
+            for (int i = 0; i < q_dim; i++) {
+                int iv = (int)lrintf(attn_cat[i] * sc);
+                tmp_i8[i] = (int8_t)(iv < -128 ? -128 : (iv > 127 ? 127 : iv));
+            }
+            fwrite(tmp_i8, 1, (size_t)q_dim, f);
+            free(tmp_i8); fclose(f);
+        }
+    }
 
     /* ── Output projection: attn_cat [q_dim] → o_weight [d_model][q_dim] → out [d_model] ── */
     /* o_weight is stored as [d_model rows × q_dim cols] packed 2-bit.
