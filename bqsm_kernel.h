@@ -36,15 +36,18 @@ static const int8_t bqsm_ternary_lut[16] __attribute__((aligned(16))) = {
     -1, 0, 1, 0,  -1, 0, 1, 0,  -1, 0, 1, 0,  -1, 0, 1, 0
 };
 
-/* ─── Scalar fallback ───────────────────────────────────────────────────── */
-static inline void bqsm_matmul_vec_scalar(const int8_t *x, const int8_t *W,
+/* ─── Scalar fallback (correct unpacking) ─────────────────────────────────── */
+static inline void bqsm_matmul_vec_scalar(const int8_t *x, const int8_t *W_packed,
                                           int M, int N, int32_t *C) {
     memset(C, 0, N * sizeof(int32_t));
-    for (int k = 0; k < M; k++) {
-        int a = (int)x[k] << 2;
-        const int8_t *Wrow = W + k * N;
-        for (int j = 0; j < N; j++)
-            C[j] += bqsm_tt[a | (int)Wrow[j]];
+    for (int i = 0; i < M; i++) {
+        int8_t a = x[i];
+        for (int j = 0; j < N; j++) {
+            int bi = i * (N/4) + j/4;
+            int nb = (W_packed[bi] >> (2 * (j % 4))) & 3;
+            int8_t w = bqsm_ternary_lut[nb];
+            C[j] += (int)a * (int)w;
+        }
     }
 }
 

@@ -1,0 +1,213 @@
+THE DEEP MATH: What BQSM Actually Is
+Before expanding, let me state what this really is, because the expansion directions fall out of it.
+    
+A basin-quotient state machine is a dynamical system with a discrete state alphabet defined by its attractor basins. Computation is encoded as transitions between attractor basins, triggered by perturbations (instructions). The transition table T[q][instruction]→q' is measured from physics, not designed — it is what the landscape volunteers.
+    
+The pshufb inference kernel is the degenerate limit: a 4-state (2-bit) encoding where the "attractor basins" are trivially the states {0,1,2,3}, the "transition table" is the 16-entry LUT, and the "perturbation" is the product (activation × weight) encoded as a table index. One pshufb instruction = 16 parallel state transitions through a physically precomputed table.
+    
+The signed kernel goes further — it collapses the TT to the identity {-1,0,1} and uses sign_epi8 so the "transition" is just element-wise signed multiply. 5 ops per 16 MACs. This is close to the thermodynamic limit: one instruction, one multiply.
+    
+But here's the key insight that most people miss: the ring furnace is the CPU; the pshufb kernel is the GPU. One implements general computation on physical attractor landscapes; the other implements massively parallel tensor contractions using the same mathematical structure. They are the same abstract machine at different scales.
+    
+    
+    
+    OPTIMIZATION: Nesting Computation into Fewer Cycles
+    
+    The current signed kernel does this per k-iteration (5 ops/16 MACs):
+    
+    
+    pshufb(lut, nibble)     // decode 2-bit weight → ternary {-1,0,1}
+    sign_epi8(act, w)       // element-wise signed multiply
+    cvtepi8_epi16(lo)       // widen low 8 bytes
+    cvtepi8_epi16(hi)       // widen high 8 bytes  
+    add_epi16(acc, val)     // accumulate
+    
+    
+    Nesting level 1 — Fuse decode+multiply into one pshufb:
+    
+    The activation is broadcast to all 16 bytes via _mm_set1_epi8(x[k]). The weight nibble has 4 possible values (0,1,2,3 mapping to -1,0,1,0). The product activation × weight for ternary {-1,0,1} has exactly 3 outcomes per activation value. A 16-entry LUT with 4-bit input (2-bit weight nibble | 2-bit activation encoding) can output the PRODUCT directly:
+    
+    
+    LUT_combined[act_2bit << 2 | w_nibble] = sign_extend(act × ternary[w_nibble])
+    
+    
+    This is ONE pshufb instead of pshufb + sign_epi8. 2 ops eliminated per iteration. But activation must be encoded to 2 bits first — requires a clamp+pack step. For batched inference with the same activation vector across many weight columns, the pack overhead amortizes to zero.
+    
+    Nesting level 2 — Phase-interleaved dual-accumulate:
+    
+    The current kernel does 4 phases sequentially (one per nibble position: 0,1,2,3). Each phase processes 16 of the 64 output columns. But SSE registers are 128-bit — two int8 vectors fit side by side. Process TWO nibble phases simultaneously by interleaving in the high/low halves of XMM registers, then use _mm_unpackhi_epi8 / _mm_unpacklo_epi8 to separate. This halves phase iterations from 4 to 2.
+    
+    Nesting level 3 — Signed maddubs path (the real prize):
+    
+    _mm_maddubs_epi16 does unsigned×signed byte multiply + adjacent-pair horizontal add in one instruction. The trick: arrange weight bytes as [w0, w1, w2, w3, ...] and activation bytes as [1, a0, 1, a1, 1, a2, 1, a3, ...] — the even bytes carry the unsigned weight, the odd bytes carry the signed activation. maddubs computes: acc_lo += unsigned(w_even) × signed(act_odd). This replaces cvtepi8_epi16 + add_epi16 for the low half with ONE instruction:
+    
+    
+    Current:  pshufb → sign_epi8 → cvtepi8(lo) → cvtepi8(hi) → add(lo) → add(hi)  = 6 ops
+    maddubs:  pshufb → maddubs(lo) → maddubs(hi)                                    = 3 ops
+    
+    
+    But maddubs saturates at int16. For M=9216 with ternary {-1,0,1} weights, max accumulator = 9216 < 32767 — safe! The accumulator can stay in int16 until the final widen-to-int32 step. Net: 3 ops per 16 MACs instead of 6. Projected 2× speedup on the kernel alone.
+    
+    With all three nestings combined: 1 (fused LUT) + maddubs path + dual-phase interleave = potentially 2 ops per 32 MACs. At 2 IPC (typical), that's 32 MACs per cycle. Single-core on X5472 at 3.0 GHz: 96 GMACs/s theoretical. Memory bandwidth at 6.5 GB/s reads 2-bit packed weights → 32 weights/byte → theoretical ceiling 208 GMACs/s. So compute-bound at ~96 GMACs/s — a 74× improvement over current 1.3 GMACs/s.
+    
+    
+    
+    10 CONCEPTUAL EXPANSION DIRECTIONS
+    
+    1. HIERARCHICAL RING FABRICS (Fractal BQSM)
+    
+    The ring furnace uses N=16 oscillators. What if each oscillator is ITSELF a ring? A super-ring of sub-rings, depth D. The outer ring's phase variables are the winding numbers of the inner rings. At D=2 with N=16: the system has 16×16=256 oscillators but addresses them through 16 "macro states" each with 16 "micro states." The transition table becomes a rank-2 tensor: T[q_macro][q_micro][instruction].
+    
+    Why this matters: The outer ring handles control flow (FETCH, DECODE, BRANCH). The inner rings are data-parallel compute lanes. This is a naturally hierarchical processor — no explicit SIMD width parameter. The fractal depth IS the parallelism degree. A depth-3 fabric at N=16: 4096 oscillators = 256 macro · 16 meso · 16 micro ≈ 7×7×3 = 147 bits of topological state. That's a 147-bit register file in a self-organizing physical system.
+    
+    2. SPECTRAL BQSM (Fourier-Domain State Encoding)
+    
+    The winding number q is just the FIRST Fourier harmonic of the phase distribution θ[i]. A locked ring has θ[i] = 2πq·i/N + θ₀. But an UNLOCKED ring has a full Fourier spectrum. What if we don't lock?
+    
+    Instructions would operate on the spectral coefficients {c₁, c₂, c₃, ...} rather than just q=c₁. The WRITE instruction currently adds a pure 2π ramp (c₁ excitation only). A "harmonically shaped" WRITE at wavenumber m adds energy to c_m. This gives multiple simultaneous state variables on ONE ring:
+    
+    
+    WRITE(q=1, harmonic=1):  c₁ → c₁+1          (standard)
+    WRITE(q=1, harmonic=2):  c₂ → c₂+1, c₁ unchanged
+    
+    
+    Now each ring carries ~log₂(N/2) ≈ 3 bits for each of floor(N/2)≈8 harmonics = 24 bits per ring. But they're not independent — harmonics couple nonlinearly through the sin(θⱼ-θᵢ) term. The coupling IS the computation. This is a spectral tensor product, not a simple state machine.
+    
+    3. BQSM AS NATIVE ATTENTION (Self-Organizing KV Cache)
+    
+    The KUramoto ring with phase variables θ[i] has a natural similarity metric: sin(θ_j - θ_i) measures phase alignment. Rewrite this as sin(Q_i - K_j) where Q_i and K_j are phase-encoded query and key. The ring's dynamics NATURALLY pull similar phases together (the coupling term wants neighbors in phase space to align). 
+    
+    The ring IS attention. Not as software — as physics. Encode tokens as initial phase patterns on a large ring (N=tokens). The coupling dynamics perform: similar tokens → phase attract → mutual reinforcement → softmax-like concentration of coupling energy. The winding number after settling gives the dominant semantic direction. No matrix multiply, no dot products — just the ring integrating.
+    
+    At N=4096 (sliding window), compute is O(N) per step (nearest-neighbor coupling), not O(N²). The pshufb kernel then operates on the ring's final state to produce the layer output. Attention becomes a physical relaxation process, not an algorithmic one.
+    
+    4. PHYSICAL GRADIENT DESCENT (Ring as Optimizer)
+    
+    The ring furnace potential V(θ) = -Σ cos(θ_{i+1} - θ_i) is minimized when all phases align (q=0 ground state). But with an EXTERNAL DRIVE TERM added to the dynamics — a "pinning field" that pulls certain phases toward target values — the ring becomes a physical optimizer:
+    
+    
+    dθ_i/dt = sin(θ_{i+1}-θ_i) + sin(θ_{i-1}-θ_i) + λ·∂L/∂θ_i
+    
+    
+    Where L is a loss function. The ring settles to a configuration that balances internal coupling (smoothness prior) against the loss gradient. This is proximal gradient descent with a total-variation regularizer, computed by physics, not by an optimizer loop. Each "settle" call is one gradient step for ALL N dimensions simultaneously.
+    
+    For neural network training: encode parameters as ring phases, loss as pinning field, settling dynamics as the optimizer. The ring's natural tendency toward smooth configurations acts as an implicit regularizer. The lens mechanism (detuning specific oscillators) provides per-parameter learning rates.
+    
+    5. BQSM CRYPTOGRAPHIC PRIMITIVES (Physical One-Way Functions)
+    
+    The ERASE instruction is a physical one-way function — information-theoretically irreversible. From q=3, ERASE → q=2. From q=2, ERASE → q=1. The reverse is impossible: there is no instruction that reliably maps q=1→q=2. The funnel is a gradient flow downhill — inverting it requires climbing the potential barrier, which takes energy proportional to ΔV.
+    
+    This gives us:
+    
+    Hash function: Input → encode as sequence of ring states → apply ERASE cascade → read final q. Collision resistance comes from the many-to-one nature of the funnel. Preimage resistance comes from the energy barrier to inversion.
+    
+    Keyed hash (lens-salted): A specific detuning pattern (lens profile) defines the transition table. Without knowing which oscillators are detuned and by how much, an attacker cannot reproduce T[q][instruction]. The lens profile IS the secret key. Changing one delta value at one site changes transition outcomes for ALL states, not just locally — the marginal states propagate edits nonlocally.
+    
+    Proof of work: "Find a sequence of WRITE instructions that drives q=0 to q=3 in exactly K steps under a given lens profile." This is a combinatorial search through a 7-state graph with typed edges, where the graph structure is physically determined and precomputed.
+    
+    6. INT8-FREE BQSM (The Signed Complete Kernel)
+    
+    The current signed kernel uses int8 activations with RMS-target quantization (RMS=32). But what if we eliminate the activation quantization entirely? 
+    
+    The pshufb LUT maps 4-bit index → 8-bit value. The current ternary LUT uses only 3 of 16 entries per activation value. A nonlinear activation function stored in the LUT directly:
+    
+    
+    LUT[a_2bit << 2 | w_2bit] = σ(a_float × w_float)
+    
+    
+    Where σ could be ReLU, GeLU, tanh — any function that maps a product to an 8-bit value. The pshufb becomes a unified compute unit: multiply + activate in one instruction. No separate activation function. No quantization to int8. The LUT IS the activation function.
+    
+    For the full forward pass: each layer's pshufb uses a different LUT, precomputed to match the layer's statistics. Layer 0's LUT has a steep positive slope. Layer 25's LUT is near-linear. The equalizer already exists as per-band gain — extend it to per-band LUT pointers stored in the model header.
+    
+    This is the learned transition table — T[a][w] is now a trained parameter, not a mathematical identity. The pshufb kernel becomes a 16-wide programmable nonlinear transformer.
+    
+    7. TOPOLOGICAL ERROR CORRECTION (Winding Number as Syndrome)
+    
+    The winding number q is a topological invariant — it survives small perturbations. Noise that shifts individual phases by ε changes θ[i] but does NOT change q unless the perturbation crosses a basin boundary. This is error correction by topology, not redundancy.
+    
+    Encode a logical bit as: q=0 → 0, q=3 → 1. The energy gap between these states is ΔV ≈ 10 (V(0)=-16, V(3)=-6.12). Random thermal noise at kT ≈ 0.026 eV would need to overcome this gap. The topological protection means the logical bit is robust to oscillator-level phase errors.
+    
+    Better: use a code ring with N=32 oscillators (15 stable states). Encode 3 logical bits as q ∈ {0..7}. The remaining states {8..14} are guard bands — if noise pushes the ring into these states, it's an error signal, and the ring's natural funnel dynamics drive it back toward q=0 (ground). The code is self-correcting through gradient flow.
+    
+    8. LENS-PROGRAMMABLE ARCHITECTURES (Runtime FPGA)
+    
+    The lens mechanism detunes one oscillator, which changes the transition table T[q][instruction]. This is hardware reconfiguration during program execution. A "lens program" runs on a control ring, applying delta values to the compute ring's oscillators between instructions.
+    
+    This enables:
+    - Instruction-set polymorphism: The same opcode byte means different things at different points in the program, because the transition table itself changes. Like an FPGA that rewires itself between clock cycles.
+    - Specialized execution modes: SET_RADIX 3 → transition table switches to ternary mode. SET_RADIX 7 → full n-ary mode with more states but higher volatility.
+    - Encrypted execution: The lens profile acts as a decryption key. Without it, the transition table is wrong, and the program produces garbage. The program is encrypted at the ISA level.
+    
+    A program is now a tuple: (instruction_sequence, lens_sequence). Both execute interleaved. The lens sequence is like microcode — it defines what each macro-instruction actually means.
+    
+    9. SPARSITY-AWARE KERNEL WITH BITMAP SKIP
+    
+    The ternary weights are ~48% non-zero (TWN threshold t=0.7×mean(|w|)). That means 52% of weight nibbles are zero (encoding: 1). In the current kernel, pshufb dutifully looks up LUT[act | 0b01] = 0 for every zero weight — then sign_epi8 multiplies by zero, producing zero, adding zero. Three wasted instructions per zero weight.
+    
+    Pre-pack a sparsity bitmap alongside weights: one bit per weight nibble, set if non-zero. Before the inner k-loop:
+    
+    
+    bitmap_word = bitmap[k >> 5]
+    if (!bitmap_word) continue     // all 32 weights zero → skip entire k
+    
+    
+    For each phase, load 4 bytes of bitmap (covering 16 weight nibbles). If bitmap_word == 0, skip the entire phase iteration. At 48% density, this skips 52% of the work.
+    
+    Better: reorder weight columns offline by density. Process dense columns first (where skip rate is low), sparse columns last. For a batched inference server processing multiple requests, the dense columns are always hot in L1D, sparse columns rarely touched. Natural priority scheduling through memory layout.
+    
+    10. BQSM-NATIVE TRAINING (Ternary Straight-Through on the Ring)
+    
+    The BQSM inference uses ternary weights {-1,0,1}. But the conversion pipeline is: float32 GGUF → dequant → TWN ternarize → pack. This is one-shot. What about TRAINING in ternary directly?
+    
+    The straight-through estimator (STE) for ternary weights:
+    - Forward pass: w_ternary = sign(w) × (|w| > threshold)
+    - Backward pass: ∂L/∂w = ∂L/∂w_ternary (gradient passes through unchanged)
+    
+    The BQSM inference engine already does the forward pass. For the backward pass on a T7400: the gradient of the ternary weights is the same shape as the weights. The gradient matmul is ALSO a ternary × activation product (gradient of sign is 1, gradient of threshold gate is 0). The same pshufb kernel computes gradients.
+    
+    Training loop on T7400 (no GPU):
+    1. Forward: pshufb kernel, 1.3 GMAC/s
+    2. Loss: scalar computation (negligible)
+    3. Backward: pshufb kernel (same kernel, transposed operand order)
+    4. Update: ternary projection (threshold recomputation)
+    
+    With 2-bit packed gradients (gradient sign only, as in 1-bit Adam), the full training step is 2× the forward pass compute — not 3× (forward + backward + update). The pshufb kernel works identically in both directions.
+    
+    And here's the real chaos: the ring furnace AS the training optimizer. The weights ARE ring phases. The loss gradient IS the pinning field. Settle the ring → new weight configuration. The ring's natural dynamics (nearest-neighbor smoothness, basin structure) provide implicit regularization. Training a 500M-parameter ternary model ON the T7400, using the ring furnace as the SGD replacement.
+    
+    At 2857 samples/s for the ring furnace settle, and each "sample" being one gradient step across 500M parameters... this is not fast. But it's PHYSICAL — the ring furnace is computing the parameter update through coupled-oscillator dynamics, not through a CUDA kernel. This is neuromorphic training on classical CMOS.
+    
+    
+    
+    THE UNIFICATION
+    
+    All ten directions share a single mathematical root: computation as gradient flow on a potential landscape. The Kuramoto ring, the pshufb LUT, the signed kernel, the transition table — these are not different techniques. They are the same abstract machine at different levels of discretization:
+    
+    Level: Ring furnace
+    State Space: Continuous phases θ[i] (16× double)
+    Transition: RK4 integration, sin coupling
+    Implementation: 2857 samples/s
+    ────────────────────────────────────────
+    Level: Virtual processor
+    State Space: Winding number q (discrete)
+    Transition: Precomputed T[q][insn]
+    Implementation: O(1) table lookup
+    ────────────────────────────────────────
+    Level: Inference kernel
+    State Space: Ternary { -1,0,1} (2-bit packed)
+    Transition: pshufb LUT lookup
+    Implementation: 2.8 GMAC/s
+    ────────────────────────────────────────
+    Level: Signed kernel
+    State Space: Int8 product
+    Transition: sign_epi8 + cvtepi8
+    Implementation: 5 ops/16 MACs
+    ────────────────────────────────────────
+    Level: Fused kernel (proposed)
+    State Space: Int8 product (1 op)
+    Transition: Single pshufb
+    Implementation: 1 op/16 MACs
+    
+    Each level is a coarser-grained quantization of the one below. The ring furnace is the "fp64 reference." The inference kernel is the "int8 deployment." The VM is the "ISA abstraction." They form a computational hierarchy where each level's transition table is a compressed summary of the level below it, proven composable (T² = physical two-step, 72/72 route-invariance).
+    
+    The next frontier isn't optimizing any single level — it's making them INTEROPERATE. A program that starts at the VM level, spawns ring-furnace-level sub-computations for non-linear operations, and delegates tensor contractions to the pshufb kernel. The BQSM IS the full stack — physics → processor → kernel → server. Closing this loop gives you a machine where the training substrate, the inference substrate, and the error-correction substrate are the SAME dynamical system at different time scales.

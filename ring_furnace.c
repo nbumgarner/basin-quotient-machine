@@ -90,18 +90,11 @@ static inline double fast_sin(double x){
 #define SIN sin
 #endif
 
-/* Batch state, SoA: value of site i in lane l lives at [i*L + l].           */
-typedef struct {
-    int     L;                          /* live lanes in this batch          */
-    double *th;                         /* phases        [N*L]               */
-    double *om;                         /* per-lane ω    [N*L] (lens differs
-                                           per experiment, so ω is per-lane
-                                           even when identical — uniformity
-                                           beats a special case)             */
-    double *k1, *k2, *k3, *k4, *tmp;    /* RK4 workspaces [N*L] each         */
-} batch_t;
+#include "bqsm-quantum/vqpu_bridge.h"
 
-static batch_t *batch_new(int L){
+/* ─── ring_furnace-specific internals (not in bridge) ──────────────────── */
+
+batch_t *batch_new(int L){
     batch_t *b = malloc(sizeof *b);                     /* the batch object  */
     b->L = L;                                           /* lane count        */
     size_t sz = (size_t)N * L * sizeof(double);         /* one field's bytes */
@@ -113,7 +106,7 @@ static batch_t *batch_new(int L){
         { fprintf(stderr, "alloc failed\n"); exit(1); } /* fail loud         */
     return b;
 }
-static void batch_free(batch_t *b){
+void batch_free(batch_t *b){
     free(b->th); free(b->om); free(b->k1); free(b->k2); /* every field       */
     free(b->k3); free(b->k4); free(b->tmp); free(b);    /* then the shell    */
 }
@@ -220,9 +213,52 @@ static void settle(batch_t *b, int *locked){
     }                                                   /* patience expired: */
 }
 
+/* ── vQPU: partial settle + Fourier snapshot (keep_phases) ────────────── */
+
+/* Partial settle: run exactly `max_chunks` chunks of RK4 integration without
+ * checking lock conditions. Use for keep_phases mode where the ring stays
+ * mid-evolution — intermediate phase distributions ARE the vQPU state.      */
+void settle_partial(batch_t *b, int max_chunks){
+    int steps = (int)(T_CHUNK / DT);
+    for (int c = 0; c < max_chunks; c++) {
+        for (int s = 0; s < steps; s++) rk4_step(b);
+    }
+}
+
+/* Discrete Fourier transform of lane l's phases at current snapshot.
+ * c_real[k] + i·c_imag[k] for k = 0..N/2 (9 coefficients at N=16).
+ * c_0 = mean phase (DC), c_{N/2} = Nyquist (real-valued).
+ * Conjugate symmetry: c_{-k} = c_k*, so k > N/2 carries no new info.
+ * Formula: c_k = (1/N)·Σ_j θ[j]·exp(−2πi·k·j/N).                          */
+void fft_snapshot(const batch_t *b, int l, double *c_real, double *c_imag){
+    int M = N / 2 + 1;                                  /* 0..N/2 inclusive  */
+    for (int k = 0; k < M; k++) {
+        double re = 0.0, im = 0.0;
+        for (int j = 0; j < N; j++) {
+            double arg = -2.0 * M_PI * k * j / N;       /* −2πikj/N          */
+            double ph  = b->th[j * b->L + l];           /* θ[j] for this lane*/
+            re += ph * cos(arg);
+            im += ph * sin(arg);
+        }
+        c_real[k] = re / N;
+        c_imag[k] = im / N;
+    }
+}
+
+/* Apply a pure Fourier-mode perturbation to lane l.
+ * P[j] = amp · sin(2π·k·j/N + phase) applied to all N sites.
+ * This directly excites harmonic k in the ring's Fourier spectrum.          */
+void apply_fourier_kick(batch_t *b, int l, int k_mode, double amp,
+                                double phase){
+    for (int j = 0; j < N; j++) {
+        double arg = 2.0 * M_PI * k_mode * j / N + phase;
+        b->th[j * b->L + l] += amp * sin(arg);
+    }
+}
+
 /* Winding number of lane l: wrapped phase differences summed around the
  * ring, snapped to the integer topological invariant.                       */
-static int winding(const batch_t *b, int l){
+int winding(const batch_t *b, int l){
     double s = 0.0;                                     /* winding accumulator*/
     for (int i = 0; i < N; i++) {                       /* around the ring   */
         double d = b->th[((i + 1) & NMASK) * b->L + l]  /* neighbor phase    */
@@ -234,13 +270,13 @@ static int winding(const batch_t *b, int l){
 }
 
 /* Write the ideal twisted state q into lane l.                              */
-static void set_twisted(batch_t *b, int l, int q){
+void set_twisted(batch_t *b, int l, int q){
     for (int i = 0; i < N; i++)                         /* θ_i = 2πqi/N      */
         b->th[i * b->L + l] = fmod(2.0*M_PI*q*i/N, 2.0*M_PI);
 }
 
 /* Apply the standard 3-site kick to lane l at `site` with amplitude `amp`. */
-static void apply_kick(batch_t *b, int l, int site, double amp){
+void apply_kick(batch_t *b, int l, int site, double amp){
     for (int k = -(KICK_W/2); k <= KICK_W/2; k++)       /* window sweep      */
         b->th[((site + k) & NMASK) * b->L + l] += amp;  /* masked ring index */
 }
@@ -762,6 +798,95 @@ static int cmd_octopus(double delta, long samples, int rays, int trials,
  * — build_table is selftest-anchored and stays untouched); bisection for
  * escapes (rejected — finds AN exit, not the first).                        */
 
+/* ── vQPU Interference Visibility Experiment ──────────────────────────── */
+
+/* Interference sweep: the vQPU validation gate.
+ * Protocol (from vQPU_SPEC.md §8):
+ *   1. Twist ring to q_init
+ *   2. Apply perturbation: c₁ = pert_amp·exp(iφ) (k=1 Fourier kick)
+ *                           c₂ = pert_amp/2          (k=2 Fourier kick, φ=0)
+ *   3. Partial settle for K chunks (keep_phases — no attractor lock)
+ *   4. Read winding number q_final(φ)
+ *   5. Sweep φ ∈ [0, 2π] in N_φ steps
+ *   6. Report V = (q_max − q_min)/(q_max + q_min + ε)
+ *
+ * V > 0.5 → mode coupling present (genuine interference)
+ * V < 0.3 → linear damping only (vQPU invalidated)
+ *
+ * Returns non-zero if the experiment couldn't run (e.g. q_init not alive).  */
+static int cmd_interference_sweep(int q_init, double pert_amp, int chunks,
+                                  int phi_steps, const char *path){
+    FILE *csv = path ? fopen(path, "w") : NULL;
+    if (path && !csv) { perror(path); return 1; }
+
+    printf("interference sweep: q_init=%d pert_amp=%.2f chunks=%d φ_steps=%d\n",
+           q_init, pert_amp, chunks, phi_steps);
+
+    /* Verify q_init is a valid attractor on pristine fabric.                */
+    batch_t *bc = batch_new(1);
+    set_twisted(bc, 0, q_init);
+    int lock0[LMAX]; settle(bc, lock0);
+    if (!lock0[0] || winding(bc, 0) != q_init) {
+        printf("q_init=%d DEAD — cannot seed interference sweep\n", q_init);
+        batch_free(bc);
+        if (csv) fclose(csv);
+        return 1;
+    }
+    double att_init[N];                                 /* snapshot of att   */
+    for (int i = 0; i < N; i++) att_init[i] = bc->th[i];
+    batch_free(bc);
+
+    if (csv) fprintf(csv, "phi,q_final,q_init,pert_amp,chunks\n");
+
+    int q_min = 9999, q_max = -9999;
+    double c1_re[9], c1_im[9];                          /* DFT workspace     */
+
+    for (int p = 0; p < phi_steps; p++) {
+        double phi = 2.0 * M_PI * p / phi_steps;        /* sweep variable   */
+
+        batch_t *b = batch_new(1);                      /* single-ring batch */
+        for (int i = 0; i < N; i++) b->th[i] = att_init[i];  /* load attractor */
+
+        /* Composite perturbation: k=1 with phase φ + k=2 with phase 0.
+         * This creates the two-mode initial condition for the sweep.        */
+        apply_fourier_kick(b, 0, 1, pert_amp, phi);     /* c₁ ∝ exp(iφ)      */
+        apply_fourier_kick(b, 0, 2, pert_amp * 0.5, 0.0); /* c₂ real          */
+
+        /* Partial settle — keep_phases: stop after K chunks.               */
+        settle_partial(b, chunks);
+
+        int q = winding(b, 0);                           /* final winding     */
+        int aq = abs(q);                                 /* unsigned for V    */
+        if (aq < q_min) q_min = aq;
+        if (aq > q_max) q_max = aq;
+
+        /* Optional DFT dump of final state for validation.                  */
+        fft_snapshot(b, 0, c1_re, c1_im);
+        printf("  φ=%.4f (%.0f°)  q=%d  |c₁|=%.4f  arg(c₁)=%.3f rad\n",
+               phi, phi * 180.0 / M_PI, q,
+               sqrt(c1_re[1]*c1_re[1] + c1_im[1]*c1_im[1]),
+               atan2(c1_im[1], c1_re[1]));
+
+        if (csv) fprintf(csv, "%.6f,%d,%d,%.4f,%d\n", phi, q, q_init, pert_amp, chunks);
+
+        batch_free(b);
+    }
+
+    double eps = 1.0;                                   /* prevent div-by-0  */
+    double V = (q_max - q_min) / (double)(q_max + q_min + eps);
+    printf("\nvisibility V = (q_max−q_min)/(q_max+q_min+ε) = (%d−%d)/(%d+%d+%.1f) = %.4f\n",
+           q_max, q_min, q_max, q_min, eps, V);
+    printf("q range: [%d, %d]\n", q_min, q_max);
+
+    if (V > 0.7)      printf("verdict: STRONG coupling  — vQPU validated\n");
+    else if (V > 0.5) printf("verdict: MODERATE coupling — vQPU viable\n");
+    else if (V > 0.3) printf("verdict: WEAK coupling    — marginal\n");
+    else              printf("verdict: NO interference  — vQPU invalidated\n");
+
+    if (csv) { fclose(csv); printf("written: %s\n", path); }
+    return 0;
+}
+
 int main(int argc, char **argv){
     if ((N & NMASK) != 0 || N < 8)                      /* mask trick guard  */
         { fprintf(stderr, "N must be a power of two ≥ 8\n"); return 2; }
@@ -777,9 +902,16 @@ int main(int argc, char **argv){
                            argc > 5 ? atoi(argv[5]) : 96,     /* D trials    */
                            argc > 6 ? argv[6] : NULL,         /* CSV (append) */
                            argc > 7 ? atoi(argv[7]) : 0);     /* shard id     */
+    if (argc >= 4 && !strcmp(argv[1], "interference")) /* vQPU validation  */
+        return cmd_interference_sweep(atoi(argv[2]),     /* q_init          */
+                           atof(argv[3]),               /* pert_amp        */
+                           argc > 4 ? atoi(argv[4]) : 4,      /* chunks     */
+                           argc > 5 ? atoi(argv[5]) : 64,     /* phi_steps  */
+                           argc > 6 ? argv[6] : NULL);        /* CSV        */
     fprintf(stderr, "usage: ring_furnace selftest\n"
                     "       ring_furnace lens-sweep <d_lo> <d_hi> <steps> <out.csv>\n"
-                    "       ring_furnace octopus <delta> [samples] [rays] [trials] [out.csv]\n");
+                    "       ring_furnace octopus <delta> [samples] [rays] [trials] [out.csv] [shard_id]\n"
+                    "       ring_furnace interference <q_init> <pert_amp> [chunks] [phi_steps] [out.csv]\n");
     return 2;                                           /* bad invocation    */
 }
 /* [Block rationale] Two subcommands only, on purpose: selftest is the

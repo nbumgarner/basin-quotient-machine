@@ -227,9 +227,9 @@ static void bqsm_attention_layer(
             int32_t dot = 0;
             for (int d = 0; d < hd; d++)
                 dot += (int32_t)q_head[d] * (int32_t)k_pos[d];
-            /* Dequantize: logit = dot * sc_q * sc_kv / √hd.
-             * sc_q, sc_kv are <1 (compress int32→int8), multiply to undo inflation. */
-            float logit_scale = sc_q * sc_kv * scale;
+            /* Dequantize: logit = dot / (sc_q * sc_kv) / √hd.
+             * sc_q, sc_kv are <1 (compress int32→int8), divide to undo inflation. */
+            float logit_scale = scale / (sc_q * sc_kv);
             float raw = (float)dot * logit_scale;
             /* Logit soft-capping: capped = cap * tanh(raw / cap) */
             float capped = ATT_LOGIT_CAP * tanhf(raw / ATT_LOGIT_CAP);
@@ -298,31 +298,34 @@ static void bqsm_attention_layer(
      * Scalar loop (one per layer per token — negligible).
      * Raw int32 accumulator written to o_raw for caller to scale+residual. */
     if (o_w) {
-        const uint8_t *wp = (const uint8_t *)o_w->data;
-        int n_out   = (int)o_w->shape[0];  /* d_model */
-        int n_in    = (int)o_w->shape[1];  /* q_dim */
-        for (int i = 0; i < n_out; i++) {
-            int32_t sum = 0;
-            for (int j = 0; j < n_in; j++) {
-                int byte_idx = (i * n_in + j) / 4;
-                int shift    = ((i * n_in + j) & 3) * 2;
-                int nb       = (wp[byte_idx] >> shift) & 3;
-                static const float tern_f[4] = {-1.0f, 0.0f, 1.0f, 0.0f};
-                float wf = tern_f[nb];
-                sum += (int32_t)(attn_cat[j] * wf);
+            const uint8_t *wp = (const uint8_t *)o_w->data;
+            int n_in    = (int)o_w->shape[0];  /* q_dim */
+            int n_out   = (int)o_w->shape[1];  /* d_model */
+            /* Zero output accumulator */
+            for (int i = 0; i < n_out; i++) {
+                o_raw[i] = 0;
             }
-            o_raw[i] = sum;
+            for (int i = 0; i < n_in; i++) {
+                float x_val = attn_cat[i];
+                for (int j = 0; j < n_out; j++) {
+                    int idx = i * n_out + j;
+                    int byte_idx = idx / 4;
+                    int shift = (idx & 3) * 2;
+                    int nb    = (wp[byte_idx] >> shift) & 3;
+                    int8_t w  = bqsm_ternary_lut[nb];
+                    o_raw[j] += (int32_t)(x_val * (float)w);
+                }
+            }
+            /* Scale output */
+            for (int i = 0; i < n_out; i++) {
+                float v = (float)o_raw[i] / (float)(n_in * 2) + 1.5f;
+                int iv = (int)(v < 0 ? 0 : (v > BQSM_Q ? BQSM_Q : v));
+                out[i] = (int8_t)iv;
+            }
+        } else {
+            memset(o_raw, 0, (size_t)d_model * sizeof(int32_t));
+            memcpy(out, x, (size_t)d_model);
         }
-        /* Also write a quantized int8 version to out for debug */
-        for (int i = 0; i < n_out; i++) {
-            float v = (float)o_raw[i] / (float)(n_in * 2) + 1.5f;
-            int iv = (int)(v < 0 ? 0 : (v > BQSM_Q ? BQSM_Q : v));
-            out[i] = (int8_t)iv;
-        }
-    } else {
-        memset(o_raw, 0, (size_t)d_model * sizeof(int32_t));
-        memcpy(out, x, (size_t)d_model);
-    }
 
     free(attn_cat);
 }
