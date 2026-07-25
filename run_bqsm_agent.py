@@ -220,7 +220,7 @@ def repl_loop(server_proc):
 
         # ----- Regular chat message -----
         # Refresh MCP data each turn so edits take effect immediately
-        mcp_data = read_mcp_files()
+        mcp_data = read_mcp()
         system_prompt = build_system_prompt(mcp_data)
 
         # Build messages for the API
