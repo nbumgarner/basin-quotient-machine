@@ -33,7 +33,7 @@
 #include "checkpoint_dump.h"
 
 /* ─── State ──────────────────────────────────────────────────────────────── */
-static int  g_port=8081, g_running=1, g_n_layers=2;
+static int  g_port=8082, g_running=1, g_n_layers=26;
 static char *g_model_path=NULL;
 static bqsm_model_t g_model;
 static int  g_loaded=0;
