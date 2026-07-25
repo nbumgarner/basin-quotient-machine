@@ -227,10 +227,9 @@ static void bqsm_attention_layer(
             int32_t dot = 0;
             for (int d = 0; d < hd; d++)
                 dot += (int32_t)q_head[d] * (int32_t)k_pos[d];
-            /* Scale: 1/(RMS² * sqrt(hd)). RMS=32 is the target quantization scale.
-             * Q_int · K_int has magnitude 32² * 256 = 262K.
-             * Dividing by 32² * 16 = 16384 brings logits to float-space (~0-16). */
-            float logit_scale = 1.0f / (32.0f * 32.0f * 16.0f);
+            /* Dequantize: logit = dot * sc_q * sc_kv / √hd.
+             * sc_q, sc_kv are <1 (compress int32→int8), multiply to undo inflation. */
+            float logit_scale = sc_q * sc_kv * scale;
             float raw = (float)dot * logit_scale;
             /* Logit soft-capping: capped = cap * tanh(raw / cap) */
             float capped = ATT_LOGIT_CAP * tanhf(raw / ATT_LOGIT_CAP);
