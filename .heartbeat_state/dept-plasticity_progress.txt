@@ -1,0 +1,38 @@
+# Dept-Plasticity Progress
+## 2026-07-27 — Hermes Agent
+
+### Status: IMPLEMENTED + VALIDATED
+
+### What Was Built
+Hebbian plasticity engine in harmonic basis per PLASTICITY_RULE_DESIGN.md:
+- Oja's rule (ΔW = η(c·p^T - c²·W)) for norm-constrained learning
+- Lateral competition (λ=0.10) for winner-take-all specialization
+- 8×8 coupling matrix W[k][j] mapping input → harmonic amplitude
+
+### Files
+- bqsm-quantum/PLASTICITY_RULE_DESIGN.md — Design document
+- bqsm-quantum/plasticity_engine.h — Public API
+- bqsm-quantum/plasticity_engine.c — Implementation (210 lines)
+- bqsm-quantum/test_plasticity.c — Benchmark suite (285 lines)
+
+### Benchmark Results
+```
+Test 1: Convergence speed — PASS (19 chunks, target < 1000)
+Test 2: Harmonic specialization — PASS
+Test 3: Oja contractive (bounded ||W||_F) — PASS
+Test 4: Robustness to distribution change — PASS
+Test 5: Multi-pattern learning — PASS
+
+Results: 5/5 tests passed
+```
+
+### Convergence Analysis
+- Input: uncorrelated with spectral gap (var[0..3]=1.0, var[4..7]=0.1)
+- Oja converges to principal eigenvector of input covariance
+- Convergence rate: ||W(t) - W*|| ≤ exp(-η·Δλ·t)
+- With η=0.01, Δλ≈0.5: convergence in ~20 chunks ✓
+
+### Next Steps
+1. Integrate with ring_furnace.c (keep_phases=true mode)
+2. Test with real ring dynamics (c_k from fft_snapshot)
+3. Multi-ring plasticity (inter-ring coupling)

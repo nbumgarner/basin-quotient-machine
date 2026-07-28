@@ -28,3 +28,4 @@ basin_machine.mp4
 # Data
 *.csv
 *.bqsm
+.worktrees/

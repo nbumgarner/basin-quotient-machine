@@ -1,0 +1,50 @@
+{
+  "dept-plasticity_agent_1785223324": {
+    "dept": "dept-plasticity",
+    "scope": "Implement Hebbian plasticity engine per PLASTICITY_RULE_DESIGN.md — Oja + competition in harmonic basis. Target: single-ring convergence < 1000 chunks.",
+    "started": "2026-07-27T22:22:04",
+    "priority": "high",
+    "model": "gemini",
+    "tmux_session": "dept-plasticity_agent"
+  },
+  "dept-lens_agent_1785223326": {
+    "dept": "dept-lens",
+    "scope": "Design pulse-receptive lens profiles for macro aggregation fix. Current: 25% harmonic detection → target >90%. Characterize pulse→harmonic transfer function.",
+    "started": "2026-07-27T22:22:05",
+    "priority": "high",
+    "model": "gemini",
+    "tmux_session": "dept-lens_agent"
+  },
+  "dept-macro_agent_1785223326": {
+    "dept": "dept-macro",
+    "scope": "Implement macro aggregation with optimized destination lenses. Test cross-vQPU feature routing.",
+    "started": "2026-07-27T22:22:06",
+    "priority": "high",
+    "model": "claude",
+    "tmux_session": "dept-macro_agent"
+  },
+  "dept-attention-routing_agent_1785223327": {
+    "dept": "dept-attention-routing",
+    "scope": "Implement Hebbian attention weight learning on macro harmonic correlations. Current routing: 50% chance → target >85%.",
+    "started": "2026-07-27T22:22:07",
+    "priority": "high",
+    "model": "claude",
+    "tmux_session": "dept-attention-routing_agent"
+  },
+  "dept-super_agent_1785223328": {
+    "dept": "dept-super",
+    "scope": "Define cross-vQPU super↔super protocol. Implement feedback modulation to macro rings.",
+    "started": "2026-07-27T22:22:08",
+    "priority": "medium",
+    "model": "claude",
+    "tmux_session": "dept-super_agent"
+  },
+  "dept-cluster_agent_1785223329": {
+    "dept": "dept-cluster",
+    "scope": "Run 16-vQPU scaling validation. Produce FPGA pin/BRAM/power projection. Start sensor fusion demo.",
+    "started": "2026-07-27T22:22:09",
+    "priority": "medium",
+    "model": "claude",
+    "tmux_session": "dept-cluster_agent"
+  }
+}

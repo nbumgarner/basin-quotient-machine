@@ -1,0 +1,50 @@
+{
+  "timestamp": "2026-07-26T21:55:04.799682",
+  "active_designs": 14,
+  "active_agents_before": 0,
+  "spawned": 7,
+  "decisions": [
+    [
+      "spawn",
+      "dept-plasticity",
+      "Implement Hebbian plasticity engine per PLASTICITY_RULE_DESIGN.md \u2014 Oja + competition in harmonic basis. Target: single-ring convergence < 1000 chunks.",
+      "high"
+    ],
+    [
+      "spawn",
+      "dept-lens",
+      "Design pulse-receptive lens profiles for macro aggregation fix. Current: 25% harmonic detection \u2192 target >90%. Characterize pulse\u2192harmonic transfer function.",
+      "high"
+    ],
+    [
+      "spawn",
+      "dept-macro",
+      "Implement macro aggregation with optimized destination lenses. Test cross-vQPU feature routing.",
+      "high"
+    ],
+    [
+      "spawn",
+      "dept-attention-routing",
+      "Implement Hebbian attention weight learning on macro harmonic correlations. Current routing: 50% chance \u2192 target >85%.",
+      "high"
+    ],
+    [
+      "spawn",
+      "dept-super",
+      "Define cross-vQPU super\u2194super protocol. Implement feedback modulation to macro rings.",
+      "medium"
+    ],
+    [
+      "spawn",
+      "dept-cluster",
+      "Run 16-vQPU scaling validation. Produce FPGA pin/BRAM/power projection. Start sensor fusion demo.",
+      "medium"
+    ],
+    [
+      "spawn",
+      "dept-micro",
+      "Validate 1-chunk settle accuracy. Sweep lens catalog. Quantization floor for Q4/Q8.",
+      "medium"
+    ]
+  ]
+}

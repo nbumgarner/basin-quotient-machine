@@ -73,14 +73,14 @@ def convert_2bit_to_3bit(input_path, output_path):
                 else:
                     packed_3bit = data
                 
-                # Write tensor to output
+                # Write tensor to output — tensor_type = 7 for 3-bit
                 out.write(struct.pack('<H', name_len))
                 out.write(name.encode('utf-8'))
                 out.write(struct.pack('<B', ndims))
                 for dim in shape:
                     out.write(struct.pack('<Q', dim))
                 out.write(struct.pack('<I', orig_n))
-                out.write(struct.pack('<B', ttype))
+                out.write(struct.pack('<B', 7))  # tensor_type = 7 (3-bit)
                 out.write(struct.pack('<I', len(packed_3bit)))
                 out.write(packed_3bit)
                 

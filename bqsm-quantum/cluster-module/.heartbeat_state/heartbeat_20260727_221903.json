@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-07-27T22:19:03.678491",
+  "active_designs": 15,
+  "active_agents_before": 7,
+  "spawned": 0,
+  "decisions": [
+    [
+      "throttle",
+      null,
+      "Max agents (6) reached. Active: 7",
+      "info"
+    ]
+  ]
+}
