@@ -885,17 +885,20 @@ static void run_macro_aggregation_cross() {
         encode_input(mic, harm, 2.0);
         make_harmonic_lens(mic->lens, harm, 0.5);
         apply_lens_micro(mic);
-        mic->last_q = 0;
+        mic->last_q = harmonic_mag(mic, harm);  /* Track harmonic magnitude */
     }
 
     /* vQPU 1: macro 0 micro rings with PULSE-RECEPTIVE lenses for each harmonic */
     for (int u = 0; u < MICRO_PER_MACRO; u++) {
         micro_ring_t *mic = &vqpu[1].macro_rings[0].micro[u];
         int harm = (u % 4) + 1;
-        /* Pulse-receptive lens: optimized for specific harmonic response to phase perturbations */
         make_pulse_receptive_lens(mic->lens, harm, 0.5);
         apply_lens_micro(mic);
-        mic->last_q = 0;
+        /* Random initial phase for destination rings */
+        for (int j = 0; j < OSC_PER_MICRO; j++) {
+            mic->th[j] = ((double)rand() / RAND_MAX - 0.5) * 2.0;
+        }
+        mic->last_q = 0.0;
     }
 
     int total_pulses = 0;
@@ -906,13 +909,26 @@ static void run_macro_aggregation_cross() {
             settle_micro(&vqpu[1].macro_rings[0].micro[u], 1);
         }
 
+        /* Apply perturbation to source rings to trigger pulses */
         for (int u = 0; u < MICRO_PER_MACRO; u++) {
-            double q = measure_winding(&vqpu[0].macro_rings[0].micro[u]);
-            if (fabs(q - vqpu[0].macro_rings[0].micro[u].last_q) > 0.5) {
-                pulse_queue_push(&pq, 0, 1, u,  1, 0, u,  q, 0.3, (u%4)+1, chunk);
+            micro_ring_t *mic = &vqpu[0].macro_rings[0].micro[u];
+            int harm = (u % 4) + 1;
+            for (int j = 0; j < OSC_PER_MICRO; j++) {
+                mic->th[j] += PULSE_STRENGTH * 2.0 * sin(2.0 * M_PI * harm * j / OSC_PER_MICRO);
+            }
+        }
+
+        for (int u = 0; u < MICRO_PER_MACRO; u++) {
+            micro_ring_t *mic = &vqpu[0].macro_rings[0].micro[u];
+            int harm = (u % 4) + 1;
+            double current_harm = harmonic_mag(mic, harm);
+            double dharm = fabs(current_harm - mic->last_q);
+
+            if (dharm > 0.1) {  /* Significant harmonic change triggers pulse */
+                pulse_queue_push(&pq, 0, 0, u,  1, 0, u,  current_harm, 0.3, harm, chunk);
                 total_pulses++;
             }
-            vqpu[0].macro_rings[0].micro[u].last_q = q;
+            mic->last_q = current_harm;
         }
 
         pulse_queue_deliver(&pq, vqpu, 2, chunk);
