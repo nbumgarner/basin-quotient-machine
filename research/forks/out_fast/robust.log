@@ -1,0 +1,24 @@
+   robust filter (R=32, sigma=0.15): kept 323/424 table entries
+delta=0.00 alive=7  state-maps=481  max-distinct-final-states=5  coverage: any-readout=240/256  READ(q!=0)=78/256  READ(q>0)=96/256
+   missing (any-readout): 1d 2e 35 3a 47 53 5c 74 8b a3 ac b8 c5 ca d1 e2
+   robust filter (R=32, sigma=0.15): kept 328/448 table entries
+delta=0.05 alive=7  state-maps=773  max-distinct-final-states=5  coverage: any-readout=240/256  READ(q!=0)=78/256  READ(q>0)=96/256
+   missing (any-readout): 1d 2e 35 3a 47 53 5c 74 8b a3 ac b8 c5 ca d1 e2
+   robust filter (R=32, sigma=0.15): kept 336/448 table entries
+delta=0.10 alive=7  state-maps=773  max-distinct-final-states=5  coverage: any-readout=240/256  READ(q!=0)=78/256  READ(q>0)=96/256
+   missing (any-readout): 1d 2e 35 3a 47 53 5c 74 8b a3 ac b8 c5 ca d1 e2
+   robust filter (R=32, sigma=0.15): kept 335/448 table entries
+delta=0.15 alive=7  state-maps=1085  max-distinct-final-states=5  coverage: any-readout=248/256  READ(q!=0)=86/256  READ(q>0)=104/256
+   missing (any-readout): 35 3a 53 5c a3 ac c5 ca
+   robust filter (R=32, sigma=0.15): kept 267/306 table entries
+delta=0.20 alive=5  state-maps=1199  max-distinct-final-states=5  coverage: any-readout=248/256  READ(q!=0)=86/256  READ(q>0)=104/256
+   missing (any-readout): 35 3a 53 5c a3 ac c5 ca
+   robust filter (R=32, sigma=0.15): kept 255/320 table entries
+delta=0.35 alive=5  state-maps=1199  max-distinct-final-states=5  coverage: any-readout=248/256  READ(q!=0)=86/256  READ(q>0)=104/256
+   missing (any-readout): 35 3a 53 5c a3 ac c5 ca
+   robust filter (R=32, sigma=0.15): kept 247/320 table entries
+delta=0.50 alive=5  state-maps=1895  max-distinct-final-states=5  coverage: any-readout=248/256  READ(q!=0)=182/256  READ(q>0)=104/256
+   missing (any-readout): 35 3a 53 5c a3 ac c5 ca
+   robust filter (R=32, sigma=0.15): kept 254/320 table entries
+delta=0.65 alive=5  state-maps=3179  max-distinct-final-states=5  coverage: any-readout=248/256  READ(q!=0)=186/256  READ(q>0)=112/256
+   missing (any-readout): 35 3a 53 5c a3 ac c5 ca

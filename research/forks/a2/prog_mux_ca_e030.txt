@@ -1,0 +1,19 @@
+GEOM=half EPS=0.300 PATIENCE=40 DT=0.50
+   f=0xca  start (qA,qB,qO)=(+0,+0,-1)  READ O in {+0}
+      b0: 0 -> NOP                        1 -> A.WRITE+(s=0,w=16)
+      b1: 0 -> NOP                        1 -> B.WRITE+(s=0,w=16)
+      b2: 0 -> O.ERASE(s=2,a=2.2)         1 -> O.ERASE(s=10,a=2.2)
+   x=0 (b2b1b0=000):  s0=(+0,+0,-1)  s1=(+0,+0,-1)  s2=(+0,+0,-1)  READ=0
+   x=1 (b2b1b0=001):  s0=(+1,+0,-1)  s1=(+1,+0,-1)  s2=(+1,+0,-1)  READ=0
+   x=2 (b2b1b0=010):  s0=(+0,+0,-1)  s1=(+0,+1,-1)  s2=(+0,+1,-1)  READ=0
+   x=3 (b2b1b0=011):  s0=(+1,+0,-1)  s1=(+1,+1,-1)  s2=(+1,+1,-1)  READ=0
+   x=4 (b2b1b0=100):  s0=(+0,+0,-1)  s1=(+0,+0,-1)  s2=(+0,+0,-1)  READ=0
+   x=5 (b2b1b0=101):  s0=(+1,+0,-1)  s1=(+1,+0,-1)  s2=(+1,+0,-1)  READ=0
+   x=6 (b2b1b0=110):  s0=(+0,+0,-1)  s1=(+0,+1,-1)  s2=(+0,+1,+0)  READ=1
+   x=7 (b2b1b0=111):  s0=(+1,+0,-1)  s1=(+1,+1,-1)  s2=(+1,+1,+0)  READ=1
+   physical clean: 75.0% (0 unlocked)
+   physical sigma=0.05: 75.0% (0 unlocked of 2048)
+   physical sigma=0.10: 75.0% (0 unlocked of 2048)
+   physical sigma=0.15: 74.8% (0 unlocked of 2048)
+   physical sigma=0.20: 74.2% (0 unlocked of 2048)
+   physical sigma=0.30: 72.1% (0 unlocked of 2048)

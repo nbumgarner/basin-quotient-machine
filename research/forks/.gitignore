@@ -1,0 +1,12 @@
+# The repository ignores *.csv; the CSVs here are the measured data behind the
+# published research notes, so they are tracked.
+!*.csv
+# build products and local timing logs
+fork_logic
+fork_logic_ref
+fork_lens
+fork_lens_ref
+fork_macro
+fork_macro_ref
+ring_furnace
+*.time

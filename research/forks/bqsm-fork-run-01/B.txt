@@ -1,0 +1,13 @@
+e=0.00  ws_drift=7.098e-13  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.02  ws_drift=9.167e-02  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.05  ws_drift=2.876e-01  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.10  ws_drift=3.782e-01  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.20  ws_drift=9.587e-01  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.30  ws_drift=1.572e+00  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.40  ws_drift=2.366e+00  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.50  ws_drift=3.369e+00  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.60  ws_drift=4.733e+00  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.70  ws_drift=1.538e+01  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.80  ws_drift=9.965e+00  states: |q|=0:150  (~1 distinct incl. sign)  unconverged=0
+e=0.90  ws_drift=6.353e+00  states: |q|=0:93 |q|=1:54 |q|=2:3  (~5 distinct incl. sign)  unconverged=50
+e=1.00  ws_drift=5.638e+00  states: |q|=0:69 |q|=1:76 |q|=2:5  (~5 distinct incl. sign)  unconverged=0

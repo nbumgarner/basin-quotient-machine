@@ -1,0 +1,43 @@
+[eps 0.1]    O.ERASE(s=2,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 24/32
+[eps 0.1]    O.ERASE(s=3,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 8/32
+[eps 0.1]    O.ERASE(s=10,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 24/32
+[eps 0.1]    O.ERASE(s=11,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 16/32
+[eps 0.1]    => 2 COPY-A and 2 COPY-B instructions on O
+[eps 0.15]    O.ERASE(s=2,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 24/32
+[eps 0.15]    O.ERASE(s=3,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 24/32
+[eps 0.15]    O.ERASE(s=10,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 24/32
+[eps 0.15]    O.ERASE(s=11,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 23/32
+[eps 0.15]    O.WRITE+(s=1,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 8/32
+[eps 0.15]    O.WRITE+(s=6,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 16/32
+[eps 0.15]    O.WRITE+(s=9,w=2)        qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 16/32
+[eps 0.15]    O.WRITE+(s=14,w=2)       qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 8/32
+[eps 0.15]    => 4 COPY-A and 4 COPY-B instructions on O
+[eps 0.2]    O.ERASE(s=2,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 32/32
+[eps 0.2]    O.ERASE(s=3,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 31/32
+[eps 0.2]    O.ERASE(s=10,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 31/32
+[eps 0.2]    O.ERASE(s=11,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 24/32
+[eps 0.2]    O.WRITE+(s=1,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 8/32
+[eps 0.2]    O.WRITE+(s=2,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 16/32
+[eps 0.2]    O.WRITE+(s=5,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 8/32
+[eps 0.2]    O.WRITE+(s=6,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 8/32
+[eps 0.2]    O.WRITE+(s=9,w=2)        qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 8/32
+[eps 0.2]    O.WRITE+(s=10,w=2)       qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 16/32
+[eps 0.2]    O.WRITE+(s=13,w=2)       qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 16/32
+[eps 0.2]    O.WRITE+(s=14,w=2)       qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 16/32
+[eps 0.2]    => 6 COPY-A and 6 COPY-B instructions on O
+[eps 0.25]    O.ERASE(s=2,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 24/32
+[eps 0.25]    O.ERASE(s=10,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 31/32
+[eps 0.25]    O.WRITE+(s=1,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 16/32
+[eps 0.25]    O.WRITE+(s=2,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 16/32
+[eps 0.25]    O.WRITE+(s=5,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 8/32
+[eps 0.25]    O.WRITE+(s=6,w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B  min pass 16/32
+[eps 0.25]    O.WRITE+(s=9,w=2)        qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 8/32
+[eps 0.25]    O.WRITE+(s=10,w=2)       qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 16/32
+[eps 0.25]    O.WRITE+(s=13,w=2)       qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 16/32
+[eps 0.25]    O.WRITE+(s=14,w=2)       qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A  min pass 22/32
+[eps 0.25]    => 5 COPY-A and 5 COPY-B instructions on O
+[eps 0.3]    O.ERASE(s=2,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 32/32
+[eps 0.3]    O.ERASE(s=3,a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A  min pass 32/32
+[eps 0.3]    O.ERASE(s=10,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 32/32
+[eps 0.3]    O.ERASE(s=11,a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B  min pass 31/32
+[eps 0.3]    => 2 COPY-A and 2 COPY-B instructions on O

@@ -1,0 +1,3 @@
+   climb  0: margin 0.0914 f=0x53  B9-A3:0.800;B11-B4:0.800;B2-O2:0.850
+   climb  1: margin 0.0927 f=0x53  B9-A3:0.800;B12-B4:0.800;B2-O2:0.850
+   climb: local optimum after 2 steps

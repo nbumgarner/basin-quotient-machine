@@ -1,0 +1,16 @@
+drive program A11-O14:1.400;B1-O3:0.850;O13-A10:0.750
+   GEOM=half EPS=0.300 PATIENCE=40 DT=0.50 mode k=0
+   best MUX f=0xca margin 0.0968; 256-function half-plane coverage (m>0.02): 50
+   clean phasor by x=b0+2b1+4b2 (|Z|, angle deg): (1.000,0.0) (0.573,-33.8)* (0.808,-17.3) (0.890,-53.9)* (0.861,16.7) (0.926,-15.5) (0.363,-0.7)* (0.892,-35.1)*
+   winding readout: every pattern is (0,0,0) by construction -> constant, computes nothing
+   phase kicks sigma  0.150: accuracy 100.0%  (n=512)  mean displacement 0.0139  margin/disp 7.0  left basin 0
+   phase kicks sigma  0.300: accuracy  99.8%  (n=512)  mean displacement 0.0279  margin/disp 3.5  left basin 0
+   phase kicks sigma  0.600: accuracy  98.0%  (n=512)  mean displacement 0.0565  margin/disp 1.7  left basin 0
+   phase kicks sigma  1.000: accuracy  93.2%  (n=512)  mean displacement 0.1127  margin/disp 0.9  left basin 17
+   omega disorder s   0.005: accuracy  79.3%  (n=512)  mean displacement 0.3074  margin/disp 0.3  left basin 0
+   omega disorder s   0.010: accuracy  58.2%  (n=512)  mean displacement 0.9950  margin/disp 0.1  left basin 3
+   omega disorder s   0.020: accuracy  56.2%  (n=512)  mean displacement 0.9980  margin/disp 0.1  left basin 22
+   omega disorder s   0.050: accuracy  55.3%  (n=512)  mean displacement 0.9830  margin/disp 0.1  left basin 70
+   drive jitter       0.050: accuracy  96.1%  (n=512)  mean displacement 0.0632  margin/disp 1.5  left basin 40
+   drive jitter       0.100: accuracy  93.4%  (n=512)  mean displacement 0.1289  margin/disp 0.8  left basin 70
+   drive jitter       0.200: accuracy  86.9%  (n=512)  mean displacement 0.2094  margin/disp 0.5  left basin 98

@@ -1,0 +1,6 @@
+(+0,+0,-1): 256/256 starts stay in the triple (0 leave or do not lock); 3 distinct attractors: 241 9 6   reference ATT is cluster 0
+(+1,+0,-1): 238/256 starts stay in the triple (18 leave or do not lock); 2 distinct attractors: 112 126   reference ATT is cluster 1
+(+0,+1,-1): 239/256 starts stay in the triple (17 leave or do not lock); 2 distinct attractors: 110 129   reference ATT is cluster 1
+(+1,+1,-1): 256/256 starts stay in the triple (0 leave or do not lock); 4 distinct attractors: 79 99 51 27   reference ATT is cluster 2
+(+0,+0,+0): 256/256 starts stay in the triple (0 leave or do not lock); 1 distinct attractors: 256   reference ATT is cluster 0
+(+1,+0,+0): 256/256 starts stay in the triple (0 leave or do not lock); 2 distinct attractors: 249 7   reference ATT is cluster 0

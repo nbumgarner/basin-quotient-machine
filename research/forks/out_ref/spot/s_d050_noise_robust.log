@@ -1,0 +1,2 @@
+   robust filter (R=32, sigma=0.15): kept 246/320 table entries
+   spot-check delta=0.50: 399/400 physical 3-step runs match table composition (0 unlocked)

@@ -1,0 +1,10 @@
+delta=0.00 alive=7  state-maps=1857  max-distinct-final-states=6  coverage: any-readout=256/256  READ(q!=0)=86/256  READ(q>0)=104/256
+delta=0.05 alive=7  state-maps=5517  max-distinct-final-states=6  coverage: any-readout=256/256  READ(q!=0)=86/256  READ(q>0)=118/256
+delta=0.10 alive=7  state-maps=5517  max-distinct-final-states=6  coverage: any-readout=256/256  READ(q!=0)=86/256  READ(q>0)=118/256
+delta=0.15 alive=7  state-maps=6033  max-distinct-final-states=6  coverage: any-readout=256/256  READ(q!=0)=86/256  READ(q>0)=118/256
+delta=0.20 alive=5  state-maps=1199  max-distinct-final-states=5  coverage: any-readout=248/256  READ(q!=0)=86/256  READ(q>0)=104/256
+   missing (any-readout): 35 3a 53 5c a3 ac c5 ca
+delta=0.35 alive=5  state-maps=2155  max-distinct-final-states=5  coverage: any-readout=248/256  READ(q!=0)=186/256  READ(q>0)=112/256
+   missing (any-readout): 35 3a 53 5c a3 ac c5 ca
+delta=0.50 alive=5  state-maps=3699  max-distinct-final-states=5  coverage: any-readout=256/256  READ(q!=0)=234/256  READ(q>0)=112/256
+delta=0.65 alive=5  state-maps=5283  max-distinct-final-states=5  coverage: any-readout=256/256  READ(q!=0)=234/256  READ(q>0)=126/256
