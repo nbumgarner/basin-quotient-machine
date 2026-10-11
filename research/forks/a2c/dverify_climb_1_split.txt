@@ -1,0 +1,11 @@
+   phase kicks sigma  0.150: accuracy 100.0%  (n=512)  mean displacement 0.0000  margin/disp inf  slipped 0  not yet locked 0
+   phase kicks sigma  0.300: accuracy 100.0%  (n=512)  mean displacement 0.0000  margin/disp inf  slipped 0  not yet locked 0
+   phase kicks sigma  0.600: accuracy 100.0%  (n=512)  mean displacement 0.0000  margin/disp inf  slipped 0  not yet locked 0
+   phase kicks sigma  1.000: accuracy  98.8%  (n=512)  mean displacement 0.0374  margin/disp 4.8  slipped 16  not yet locked 0
+   omega disorder s   0.005: accuracy 100.0%  (n=512)  mean displacement 0.0235  margin/disp 7.6  slipped 2  not yet locked 10
+   omega disorder s   0.010: accuracy  99.8%  (n=512)  mean displacement 0.0818  margin/disp 2.2  slipped 5  not yet locked 39
+   omega disorder s   0.020: accuracy  99.4%  (n=512)  mean displacement 0.1315  margin/disp 1.4  slipped 14  not yet locked 54
+   omega disorder s   0.050: accuracy  98.6%  (n=512)  mean displacement 0.2011  margin/disp 0.9  slipped 27  not yet locked 76
+   drive jitter       0.050: accuracy  99.2%  (n=512)  mean displacement 0.1211  margin/disp 1.5  slipped 11  not yet locked 54
+   drive jitter       0.100: accuracy  97.9%  (n=512)  mean displacement 0.1768  margin/disp 1.0  slipped 20  not yet locked 68
+   drive jitter       0.200: accuracy  91.0%  (n=512)  mean displacement 0.2392  margin/disp 0.8  slipped 33  not yet locked 80

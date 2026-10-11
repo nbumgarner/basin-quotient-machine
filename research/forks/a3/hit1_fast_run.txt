@@ -1,0 +1,42 @@
+0:-0.400,1:0.550,5:0.600           alive=4 robust=112/132 maps=708 any=240 nz=204 pos=94  MUX8: any=8 nz=8 pos=0  mux_k=32 dec10=32
+   missing (any-readout): 12 21 36 39 48 63 6c 7b 84 93 9c b7 c6 c9 de ed
+   f=0x35  q0=-2  readout=R={-1,+1}
+      b0: 0 -> NOP                          1 -> ERASE(s=10,a=2.2)
+      b1: 0 -> WRITE+(s=0,w=16)             1 -> NOP
+      b2: 0 -> ERASE(s=3,a=2.2)             1 -> NOP
+      physical: clean 62.5%  sigma=0.15 62.4%  (0 unlocked lanes)
+   f=0x3a  q0=-2  readout=R={-2,+0}
+      b0: 0 -> NOP                          1 -> ERASE(s=10,a=2.2)
+      b1: 0 -> NOP                          1 -> WRITE+(s=0,w=16)
+      b2: 0 -> ERASE(s=3,a=2.2)             1 -> NOP
+      physical: clean 62.5%  sigma=0.15 62.2%  (0 unlocked lanes)
+   f=0x53  q0=-2  readout=R={-1,+1}
+      b0: 0 -> NOP                          1 -> ERASE(s=10,a=2.2)
+      b1: 0 -> WRITE+(s=0,w=16)             1 -> NOP
+      b2: 0 -> NOP                          1 -> ERASE(s=3,a=2.2)
+      physical: clean 62.5%  sigma=0.15 62.3%  (0 unlocked lanes)
+   f=0x5c  q0=-2  readout=R={-1,+1}
+      b0: 0 -> NOP                          1 -> ERASE(s=10,a=2.2)
+      b1: 0 -> NOP                          1 -> WRITE+(s=0,w=16)
+      b2: 0 -> NOP                          1 -> ERASE(s=3,a=2.2)
+      physical: clean 62.5%  sigma=0.15 62.3%  (0 unlocked lanes)
+   f=0xa3  q0=-2  readout=R={-2,+0}
+      b0: 0 -> NOP                          1 -> ERASE(s=10,a=2.2)
+      b1: 0 -> NOP                          1 -> WRITE+(s=0,w=16)
+      b2: 0 -> NOP                          1 -> ERASE(s=3,a=2.2)
+      physical: clean 62.5%  sigma=0.15 62.4%  (0 unlocked lanes)
+   f=0xac  q0=-2  readout=R={-2,+0}
+      b0: 0 -> NOP                          1 -> ERASE(s=10,a=2.2)
+      b1: 0 -> WRITE+(s=0,w=16)             1 -> NOP
+      b2: 0 -> NOP                          1 -> ERASE(s=3,a=2.2)
+      physical: clean 62.5%  sigma=0.15 62.4%  (0 unlocked lanes)
+   f=0xc5  q0=-2  readout=R={-1,+1}
+      b0: 0 -> NOP                          1 -> ERASE(s=10,a=2.2)
+      b1: 0 -> NOP                          1 -> WRITE+(s=0,w=16)
+      b2: 0 -> ERASE(s=3,a=2.2)             1 -> NOP
+      physical: clean 62.5%  sigma=0.15 62.4%  (0 unlocked lanes)
+   f=0xca  q0=-2  readout=R={-2,+0}
+      b0: 0 -> NOP                          1 -> ERASE(s=10,a=2.2)
+      b1: 0 -> WRITE+(s=0,w=16)             1 -> NOP
+      b2: 0 -> ERASE(s=3,a=2.2)             1 -> NOP
+      physical: clean 62.5%  sigma=0.15 62.2%  (0 unlocked lanes)

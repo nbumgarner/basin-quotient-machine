@@ -1,0 +1,4 @@
+langevin: A11-O14:1.450;B2-O1:0.850;O12-A5:0.900  f=0x35 margin 0.1794
+   GEOM=half EPS=0.300 DT=0.02  T_SET = 15 chunks = 900 time units (measured noiseless lock time)
+   D=0.00100  instantaneous phasor scatter 0.0948 (margin 0.1794)  slipped 0/128  accuracy by read window:  0.5: 99.2%  60: 99.2%  600: 99.2%
+   D=0.01000  instantaneous phasor scatter 0.5708 (margin 0.1794)  slipped 3/128  accuracy by read window:  0.5: 93.0%  60: 94.5%  600: 96.9%

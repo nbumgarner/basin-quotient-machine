@@ -1,0 +1,17 @@
+dsearch: 4096 random configs (U<=2.00, seed 17): 952 keep all 8 patterns in the q=0 basin, 344 compute a MUX8 (margin>0)
+   margin 0.0693  f=0x53  separable(256, m>0.02)= 32  O15-O5:0.500;B4-B14:1.050;A9-O13:1.000
+   margin 0.0613  f=0x35  separable(256, m>0.02)= 46  O0-O5:1.600;A2-O13:0.400;O5-B5:0.850
+   margin 0.0609  f=0x3a  separable(256, m>0.02)= 42  O8-B14:1.250;O3-A9:1.250;A0-O3:1.100
+   margin 0.0602  f=0x53  separable(256, m>0.02)= 38  A14-B11:0.900;B3-A3:1.500;A6-B12:0.650
+   margin 0.0448  f=0xca  separable(256, m>0.02)= 26  O12-B14:0.900;O6-O11:0.550;A6-O12:0.850
+   margin 0.0441  f=0xac  separable(256, m>0.02)= 34  O12-O7:0.650;O2-B3:0.650;B12-O3:1.200
+   margin 0.0423  f=0x35  separable(256, m>0.02)= 32  O1-A10:0.250;O7-O4:0.950;B7-A2:0.850
+   margin 0.0422  f=0xc5  separable(256, m>0.02)= 36  B10-B3:0.700;O10-A4:1.000;O14-A9:0.600
+   margin 0.0402  f=0xca  separable(256, m>0.02)= 42  O12-B7:1.100;B8-O7:0.750;A9-A3:1.450
+   margin 0.0399  f=0x3a  separable(256, m>0.02)= 42  O4-B15:0.350;A8-B10:0.850;B1-A14:1.300
+   margin 0.0397  f=0x3a  separable(256, m>0.02)= 24  O15-B5:0.400;A3-B12:0.200;B6-O1:1.250
+   margin 0.0392  f=0x35  separable(256, m>0.02)= 44  B4-O4:0.250;A9-B12:1.300;O12-O4:0.600
+   margin 0.0372  f=0xa3  separable(256, m>0.02)= 26  O3-A6:0.950;B5-O11:0.850;O11-A15:0.800
+   margin 0.0369  f=0x35  separable(256, m>0.02)= 42  O7-O14:1.400;B7-O9:0.650;B10-O6:0.650
+   margin 0.0369  f=0xc5  separable(256, m>0.02)= 52  B13-B4:1.250;B0-A4:0.700;B14-A11:0.400
+   margin 0.0367  f=0x5c  separable(256, m>0.02)= 42  O2-B10:0.700;A3-A12:0.750;O2-B2:0.300

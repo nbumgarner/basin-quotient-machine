@@ -1,0 +1,4 @@
+start 0:-0.550,10:-0.100,15:0.650 mux_k=13 any=128 alive=5 dec10=13
+step 0: 0:-0.550,10:-0.100,15:0.660 mux_k=20 any=144 alive=5 dec10=23
+step 1: local optimum (9 neighbours, best (19, 168))
+final 0:-0.550,10:-0.100,15:0.660 {'alive': 5, 'kept': 118, 'total': 165, 'maps': 239, 'any': 144, 'nz': 86, 'pos': 64, 'mux_any': 0, 'mux_nz': 0, 'mux_pos': 0, 'mux_k': 20, 'dec10': 23}

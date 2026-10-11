@@ -1,0 +1,1 @@
+xcheck eps=0: 0/160 ring-A ERASE entries differ from build_table (IDENTICAL)

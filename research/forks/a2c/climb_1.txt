@@ -1,0 +1,14 @@
+   climb  0: margin 0.1092 f=0x35  A11-O14:1.400;B1-O3:0.850;O12-A10:0.750
+   climb  1: margin 0.1200 f=0x35  A11-O14:1.400;B1-O3:0.850;O12-A9:0.750
+   climb  2: margin 0.1360 f=0x35  A11-O14:1.400;B1-O3:0.850;O12-A8:0.750
+   climb  3: margin 0.1491 f=0x35  A11-O14:1.400;B1-O3:0.850;O12-A7:0.750
+   climb  4: margin 0.1504 f=0xca  A11-O14:1.400;B1-O3:0.850;O12-A7:0.800
+   climb  5: margin 0.1559 f=0xca  A11-O14:1.450;B1-O3:0.850;O12-A7:0.800
+   climb  6: margin 0.1625 f=0xca  A11-O14:1.450;B2-O3:0.850;O12-A7:0.800
+   climb  7: margin 0.1655 f=0xca  A11-O14:1.450;B2-O3:0.850;O12-A6:0.800
+   climb  8: margin 0.1676 f=0x35  A11-O14:1.450;B2-O3:0.850;O12-A5:0.800
+   climb  9: margin 0.1694 f=0x35  A11-O14:1.450;B2-O2:0.850;O12-A5:0.800
+   climb 10: margin 0.1759 f=0x35  A11-O14:1.450;B2-O2:0.850;O12-A5:0.850
+   climb 11: margin 0.1781 f=0x35  A11-O14:1.450;B2-O2:0.850;O12-A5:0.900
+   climb 12: margin 0.1794 f=0x35  A11-O14:1.450;B2-O1:0.850;O12-A5:0.900
+   climb: local optimum after 13 steps

@@ -1,0 +1,8 @@
+phasor verify: GEOM=half EPS=0.300 PATIENCE=40 DT=0.50 O starts q=-1 mode k=0 f=0x3a  b2: 0->O.WRITE+(s=0,w=2) 1->O.ERASE(s=9,a=2.2)
+   clean points (Re, Im) by x=b0+2b1+4b2: (1.000,-0.000) (0.325,0.021)* (0.543,-0.812) (0.375,-0.216)* (-0.000,-0.000)* (0.065,-0.084)* (0.695,-0.686) (0.942,-0.313)
+   decoder: u=(-0.872,0.489) t=-0.6517 margin=0.2189  (* = f is 1)
+   sigma=0.05: phasor 92.7%  winding 92.6%  (n=2048)  noise radius 0.1187  margin/radius 1.84  unlocked 0
+   sigma=0.10: phasor 89.1%  winding 88.3%  (n=2048)  noise radius 0.1750  margin/radius 1.25  unlocked 3
+   sigma=0.15: phasor 83.8%  winding 82.3%  (n=2048)  noise radius 0.2411  margin/radius 0.91  unlocked 9
+   sigma=0.20: phasor 80.4%  winding 77.3%  (n=2048)  noise radius 0.2777  margin/radius 0.79  unlocked 5
+   sigma=0.30: phasor 73.9%  winding 70.1%  (n=2048)  noise radius 0.3537  margin/radius 0.62  unlocked 10

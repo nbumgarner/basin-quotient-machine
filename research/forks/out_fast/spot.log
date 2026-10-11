@@ -1,0 +1,8 @@
+   spot-check delta=0.00: 399/400 physical 3-step runs match table composition (0 unlocked)
+   spot-check delta=0.50: 400/400 physical 3-step runs match table composition (0 unlocked)
+   robust filter (R=32, sigma=0.15): kept 323/424 table entries
+   spot-check delta=0.00: 399/400 physical 3-step runs match table composition (0 unlocked)
+   robust filter (R=32, sigma=0.15): kept 247/320 table entries
+   spot-check delta=0.50: 399/400 physical 3-step runs match table composition (0 unlocked)
+   spot-check delta=0.00: 328/400 physical 3-step runs match table composition (0 unlocked)
+   spot-check delta=0.50: 373/400 physical 3-step runs match table composition (0 unlocked)

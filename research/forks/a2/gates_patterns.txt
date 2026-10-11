@@ -1,0 +1,135 @@
+== q0=0 half eps=0.1 patience=120
+     10 O.WRITE+(w=2)        qO'(00,10,01,11) = +1 +0 +0 +0  MIX
+      6 O.WRITE+(w=2)       qO'(00,10,01,11) = +1 +0 +0 +0  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=0 half eps=0.2 patience=60
+     10 O.WRITE+(w=2)        qO'(00,10,01,11) = +1 +0 +0 +0  MIX
+      6 O.WRITE+(w=2)       qO'(00,10,01,11) = +1 +0 +0 +0  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=0 half eps=0.3 patience=40
+     10 O.WRITE+(w=2)        qO'(00,10,01,11) = +1 +0 +0 +0  MIX
+      6 O.WRITE+(w=2)       qO'(00,10,01,11) = +1 +0 +0 +0  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=0 half eps=0.5 patience=24
+      2 O.WRITE+(w=8)       qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      2 O.WRITE+(w=8)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      2 O.WRITE+(w=7)       qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      2 O.WRITE+(w=7)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=0 full eps=0.1 patience=120
+      1 O.WRITE+(w=2)        qO'(00,10,01,11) = +1 -1 -1 -1  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=0 full eps=0.2 patience=60
+      1 O.WRITE+(w=4)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      1 O.WRITE+(w=3)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      1 O.ERASE(a=2.2)       qO'(00,10,01,11) = +0 +0 +0 +1  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=0 full eps=0.3 patience=40
+      9 O.WRITE+(w=7)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      9 O.WRITE+(w=6)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      9 O.WRITE+(w=5)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      9 O.WRITE+(w=4)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      9 O.WRITE+(w=3)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      8 O.WRITE+(w=8)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      7 O.ERASE(a=2.2)       qO'(00,10,01,11) = +0 +0 +0 +1  MIX
+      6 O.WRITE+(w=8)       qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+== q0=0 full eps=0.5 patience=24
+      1    contexts alive (qA,qB)=00,10,01,11: 1 0 0 0
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=1 half eps=0.1 patience=120
+      4 O.WRITE+(w=3)       qO'(00,10,01,11) = +1 +1 +1 +0  MIX
+      4 O.WRITE+(w=3)        qO'(00,10,01,11) = +1 +1 +1 +0  MIX
+      3 O.WRITE+(w=5)        qO'(00,10,01,11) = +1 +2 +2 +2  MIX
+      3 O.WRITE+(w=4)        qO'(00,10,01,11) = +1 +1 +1 +2  MIX
+      2 O.WRITE+(w=4)       qO'(00,10,01,11) = +1 +2 +2 +2  MIX
+      2 O.WRITE+(w=4)        qO'(00,10,01,11) = +1 +2 +2 +2  MIX
+      2 O.WRITE+(w=4)        qO'(00,10,01,11) = +1 +2 +1 +2  COPY-A
+      1 O.WRITE+(w=5)       qO'(00,10,01,11) = +1 +2 +2 +2  MIX
+== q0=1 half eps=0.2 patience=60
+      4 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +0 +1 +0  MIX
+      2 O.WRITE+(w=2)       qO'(00,10,01,11) = +0 +1 +0 +0  MIX
+      2 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +1 +0 +0  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=1 half eps=0.3 patience=40
+      4 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +0 +1 +0  MIX
+      2 O.WRITE+(w=3)       qO'(00,10,01,11) = +1 +0 +1 +1  MIX
+      2 O.WRITE+(w=3)        qO'(00,10,01,11) = +1 +1 +0 +1  MIX
+      2 O.WRITE+(w=2)       qO'(00,10,01,11) = +0 +1 +0 +0  MIX
+      2 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +1 +0 +0  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=1 half eps=0.5 patience=24
+      8 O.WRITE+(w=5)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      6 O.WRITE+(w=7)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      6 O.WRITE+(w=6)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      6 O.WRITE+(w=3)        qO'(00,10,01,11) = -1 +0 +0 +1  MIX
+      4 O.WRITE+(w=5)       qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      3 O.WRITE+(w=8)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      3 O.WRITE+(w=4)        qO'(00,10,01,11) = -1 +1 +1 +1  MIX
+      2 O.WRITE+(w=7)       qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+== q0=1 full eps=0.1 patience=120
+      1 O.WRITE+(w=8)        qO'(00,10,01,11) = +2 +1 +1 +1  MIX
+      1 O.WRITE+(w=7)        qO'(00,10,01,11) = +2 +1 +1 +1  MIX
+      1 O.WRITE+(w=6)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      1 O.WRITE+(w=5)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      1 O.WRITE+(w=4)        qO'(00,10,01,11) = +0 +1 +1 +1  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=1 full eps=0.2 patience=60
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=1 full eps=0.3 patience=40
+      1    contexts alive (qA,qB)=00,10,01,11: 0 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=1 full eps=0.5 patience=24
+      1    contexts alive (qA,qB)=00,10,01,11: 0 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=-1 half eps=0.1 patience=120
+      4 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +0 -1 +0  MIX
+      2 O.WRITE+(w=2)       qO'(00,10,01,11) = +0 -1 +0 +0  MIX
+      2 O.WRITE+(w=2)       qO'(00,10,01,11) = +0 +0 +0 -1  MIX
+      2 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 -1 +0 +0  MIX
+      2 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +0 +0 -1  MIX
+      2 O.ERASE(a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B
+      2 O.ERASE(a=2.2)       qO'(00,10,01,11) = -1 +0 -1 -1  MIX
+      2 O.ERASE(a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A
+== q0=-1 half eps=0.2 patience=60
+      4 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +0 -1 -1  COPY-B
+      3 O.WRITE+(w=2)       qO'(00,10,01,11) = +0 -1 +0 -1  COPY-A
+      2 O.WRITE+(w=2)       qO'(00,10,01,11) = +0 +0 +0 -1  MIX
+      2 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +0 -1 +0  MIX
+      2 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +0 +0 -1  MIX
+      2 O.ERASE(a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B
+      2 O.ERASE(a=2.2)       qO'(00,10,01,11) = -1 +0 -1 -1  MIX
+      2 O.ERASE(a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A
+== q0=-1 half eps=0.3 patience=40
+      7 O.WRITE+(w=2)        qO'(00,10,01,11) = +0 +0 +0 -1  MIX
+      5 O.WRITE+(w=2)       qO'(00,10,01,11) = +0 +0 +0 -1  MIX
+      2 O.ERASE(a=2.2)      qO'(00,10,01,11) = -1 -1 +0 +0  COPY-B
+      2 O.ERASE(a=2.2)       qO'(00,10,01,11) = -1 +0 -1 -1  MIX
+      2 O.ERASE(a=2.2)       qO'(00,10,01,11) = -1 +0 -1 +0  COPY-A
+      1 O.ERASE(a=2.2)      qO'(00,10,01,11) = -1 -1 +0 -1  MIX
+      1 O.ERASE(a=2.2)       qO'(00,10,01,11) = -1 -1 +0 -1  MIX
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+== q0=-1 half eps=0.5 patience=24
+      1    contexts alive (qA,qB)=00,10,01,11: 1 0 0 0
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=-1 full eps=0.1 patience=120
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 1 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=-1 full eps=0.2 patience=60
+      1    contexts alive (qA,qB)=00,10,01,11: 1 1 0 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=-1 full eps=0.3 patience=40
+      1    contexts alive (qA,qB)=00,10,01,11: 0 0 0 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
+== q0=-1 full eps=0.5 patience=24
+      1    contexts alive (qA,qB)=00,10,01,11: 0 0 0 1
+      1    => 0 COPY-A and 0 COPY-B instructions on O
