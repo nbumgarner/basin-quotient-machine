@@ -1,0 +1,20 @@
+# Head-to-head on Oracle Cloud Ampere A1 (4 Neoverse-N1 cores), 2026-10-12, one window, same background load
+# (two other engines idle on the box). Hermes-3-Llama-3.2-3B, 4 threads, 48 generated tokens, prompt excluded.
+# llama.cpp: commit e937b17, built from source with default CPU options; models: NousResearch's official
+#   Hermes-3-Llama-3.2-3B.Q8_0.gguf and .Q4_K_M.gguf. Command: llama-bench -m MODEL -t 4 -p 0 -n 48 -r 3
+# this engine: pure_decode.py QB 48 (model step + bf16 readout + argmax; run 0 is warm-up and not printed);
+#   served = bench.py against the engine's own server with its memory bias and other extras (BQSM_Q8=16).
+# Run 3 of QB=16 hit a load spike and is excluded from the note's 6.9-7.0 tok/s; it is kept here.
+== start 2026-10-12T04:55:09Z  load: 0.91 1.52 1.15
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| llama 3B Q8_0                  |   3.18 GiB |     3.21 B | CPU        |       4 |            tg48 |         10.57 ± 0.43 |
+| llama 3B Q4_K - Medium         |   1.87 GiB |     3.21 B | CPU        |       4 |            tg48 |         13.49 ± 0.19 |
+QB=16 run 1: 142.6 ms/token = 7.01 tok/s  (48 tokens, ids hash 64f7f8)
+QB=16 run 2: 145.4 ms/token = 6.88 tok/s  (48 tokens, ids hash 64f7f8)
+QB=16 run 3: 296.0 ms/token = 3.38 tok/s  (48 tokens, ids hash 64f7f8)
+QB=0 run 1: 235.4 ms/token = 4.25 tok/s  (48 tokens, ids hash 64f7f8)
+QB=0 run 2: 231.3 ms/token = 4.32 tok/s  (48 tokens, ids hash 64f7f8)
+served run 1: sec_per_token 0.184   tok_per_s 5.435  ids_sha1 79c5bdbb6f15
+served run 2: sec_per_token 0.1845  tok_per_s 5.42   ids_sha1 79c5bdbb6f15
+| llama 3B Q8_0                  |   3.18 GiB |     3.21 B | CPU        |       4 |            tg48 |         10.50 ± 0.30 |
+== end 2026-10-12T04:59:07Z  load: 3.23 2.70 1.74
