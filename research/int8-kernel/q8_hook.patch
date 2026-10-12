@@ -1,0 +1,45 @@
+--- a/bqsm_int8.py
++++ b/bqsm_int8.py
+@@ -75,6 +75,14 @@
+ _lib = _load("libint8.so", "int8_gemv", [ctypes.c_void_p] * 4 + [ctypes.c_int] * 2)
+ _lgm = _load("libint8gemm.so", "int8_gemm", [ctypes.c_void_p] * 4 + [ctypes.c_int] * 3)
+ _lbf = _load("libbf16.so", "bf16_gemv", [ctypes.c_void_p] * 3 + [ctypes.c_int] * 2)
++# EXPERIMENT (dev): int8 weights x int8 activations via SDOT -- changes the numerics.
++try:
++    _lq8 = ctypes.CDLL(os.path.join(HERE, "libint8q8.so")).int8_gemm_q8
++    _lq8.argtypes = [ctypes.c_void_p] * 4 + [ctypes.c_int] * 4
++    _lq8.restype = ctypes.c_int
++except OSError:
++    _lq8 = None
++Q8 = int(os.environ.get("BQSM_Q8", "0"))
+ 
+ 
+ def bf16_view(st, name):
+@@ -162,12 +170,15 @@
+         self.base = blob.ctypes.data
+         self.kv = [None] * NL
+         self.ids = []          # the token sequence that produced the current KV
++        self.q8 = Q8           # 0 = exact float path; >0 = SDOT with that activation block
+ 
+     def W(self, L, key):
+         o, (nout, nin) = self.idx[f"{L}.{key}"]
+         return self.base + o, self.base + o + nout * nin, nout, nin
+ 
+     def gemv(self, L, key, x):
++        if self.q8 and _lq8 is not None:
++            return self.gemm(L, key, np.asarray(x, np.float32).reshape(1, -1))
+         wa, sa, nout, nin = self.W(L, key)
+         xc = np.ascontiguousarray(x.ravel(), np.float32)
+         y = np.empty(nout, np.float32)
+@@ -181,6 +192,11 @@
+         Xc = np.ascontiguousarray(X, np.float32)
+         B = Xc.shape[0]
+         Y = np.empty((B, nout), np.float32)
++        if self.q8 and _lq8 is not None:
++            qb = nin if self.q8 < 0 else self.q8
++            if _lq8(ctypes.c_void_p(wa), ctypes.c_void_p(sa), Xc.ctypes.data, Y.ctypes.data,
++                    nout, nin, B, qb) == 0:
++                return Y
+         _lgm.int8_gemm(ctypes.c_void_p(wa), ctypes.c_void_p(sa),
+                        Xc.ctypes.data, Y.ctypes.data, nout, nin, B)
+         return Y

@@ -1,0 +1,10 @@
+# End to end through the live server (live configuration, incl. the associative-memory bias), one fixed
+# prompt, greedy, 48 tokens, the engine's own clock. Run 0 is cold and not used; runs 1-2 warm.
+# ids_sha1 = hash of the generated token ids: equal hashes mean identical output.
+before (2026-10-11):                 run 2  sec_per_token 0.346   tok_per_s 2.89   ids_sha1 79c5bdbb6f15
+vectorised memory lookup:            run 1  sec_per_token 0.2825  tok_per_s 3.54   ids_sha1 79c5bdbb6f15
+                                     run 2  sec_per_token 0.2825  tok_per_s 3.54   ids_sha1 79c5bdbb6f15
++ int8 kernel, BQSM_Q8=16:           run 1  sec_per_token 0.194   tok_per_s 5.155  ids_sha1 79c5bdbb6f15
+                                     run 2  sec_per_token 0.187   tok_per_s 5.348  ids_sha1 79c5bdbb6f15
+same session, exact path (control):  run 1  sec_per_token 0.281   tok_per_s 3.559  ids_sha1 79c5bdbb6f15
+                                     run 2  sec_per_token 0.2795  tok_per_s 3.578  ids_sha1 79c5bdbb6f15
