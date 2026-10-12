@@ -14,6 +14,7 @@ activations. This kernel quantises the activations too, in blocks of `QB` values
 | `q8_hook.patch` | 45 lines against `bqsm_int8.py` at bqsm-neuron `12ec130`: loads the kernel and routes the engine's products through it when `BQSM_Q8` (or `Engine.q8`) is a block size; `0` leaves the exact path untouched |
 | `fid_q8.py` | agreement with the exact path: teacher-forced top-1, KL, logit cosine, greedy generations, model step time |
 | `ppl_q8.py` | perplexity of real text under the exact path and the kernel |
+| `pure_decode.py` | decode speed of the model loop alone, the counterpart of `llama-bench -p 0` |
 | `results/` | the raw outputs the note quotes |
 
 ## Build and run
@@ -47,6 +48,18 @@ server, `BQSM_Q8=16` turns the kernel on.
 Perplexity over 2,048 tokens: 30.039 exact, 30.037 at `QB = 16`. End to end through the live server, with
 the engine's other work included: 3.5 → 5.3 tokens per second, with identical output token ids on the
 benchmark prompt (`results/speed.txt`).
+
+## Against llama.cpp on the same machine (2026-10-12)
+
+| engine | tok/s |
+|---|---|
+| llama.cpp `e937b17`, Q8_0 (about the same bytes per weight as this int8 engine) | 10.5 |
+| llama.cpp `e937b17`, Q4_K_M | 13.5 |
+| this engine, model loop only (`pure_decode.py 16`) | 6.9–7.0 |
+| this engine as served | 5.4 |
+
+llama.cpp is about 1.5× faster at equal precision. Raw output, commands and the excluded run:
+`results/headtohead.txt`.
 
 The kernel's cost grows almost linearly with the number of rows multiplied at once, so it speeds up a
 single stream and does not make batching cheaper. Overflow bound: at most `QB/4 · 127²` per int32 lane per block.
