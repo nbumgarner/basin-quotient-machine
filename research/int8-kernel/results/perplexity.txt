@@ -1,0 +1,5 @@
+# ppl_q8.py 16 32, Oracle Cloud Ampere A1 (4 Neoverse-N1 cores), 2026-10-11. 16 passages x 128 tokens
+# (8 each from WikiText-103 and Project Gutenberg).
+exact: 2048 tokens, mean NLL 3.4025 nats, perplexity 30.039, prefill 19.11 s per 129-token passage
+SDOT QB=16: mean NLL 3.4024 nats, perplexity 30.037 (delta -0.01%), prefill 12.69 s
+SDOT QB=32: mean NLL 3.3996 nats, perplexity 29.952 (delta -0.29%), prefill 15.30 s

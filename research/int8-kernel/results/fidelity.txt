@@ -1,0 +1,7 @@
+# fid_q8.py, Oracle Cloud Ampere A1 (4 Neoverse-N1 cores), 2026-10-11, Hermes-3 (Llama-3.2-3B) int8.
+# Two runs (32 16 64, then 64 -1); the live engines were also running, so step times are relative.
+exact engine: decode step median 194.1 ms
+QB=   32: teacher-forced 768 positions: top-1 agree  99.3%  ref-top1-in-q8-top5 100.0%  KL 0.0007 nats  logit cos 0.99989 | greedy: identical prefix [48, 48, 48, 48, 48, 48] of 48 | decode step median 127.5 ms
+QB=   16: teacher-forced 768 positions: top-1 agree  99.2%  ref-top1-in-q8-top5 100.0%  KL 0.0005 nats  logit cos 0.99993 | greedy: identical prefix [48, 48, 48, 48, 48, 48] of 48 | decode step median 109.8 ms
+QB=   64: teacher-forced 768 positions: top-1 agree  97.8%  ref-top1-in-q8-top5 100.0%  KL 0.0013 nats  logit cos 0.99982 | greedy: identical prefix [48, 48, 21, 48, 48, 48] of 48 | decode step median 105.0 ms
+QB=   -1: teacher-forced 768 positions: top-1 agree  90.5%  ref-top1-in-q8-top5  97.8%  KL 0.0397 nats  logit cos 0.99611 | greedy: identical prefix [11, 37, 12, 1, 28, 22] of 48 | decode step median 98.9 ms
